@@ -111,9 +111,9 @@ curl -X POST http://localhost:8888/crawl \
 
 ### 网关工具（推荐）
 
-- 工具名：`crawl_batch_unified`
+- 工具名：`track_competitor_intelligence`
 - 入参：`urls: list[str]`
-- 说明：并行调度 amazon/sif，并按 ASIN 聚合结果
+- 说明：用于亚马逊店铺竞品追踪与抓包分析；并行调度 amazon/sif，并按 ASIN 聚合结果
 
 ### Worker 工具（单节点）
 

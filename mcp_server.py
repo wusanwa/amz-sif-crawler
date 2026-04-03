@@ -4,6 +4,7 @@ import logging
 import asyncio
 import uvicorn
 from starlette.responses import JSONResponse
+from starlette.middleware.cors import CORSMiddleware
 from mcp.server.fastmcp import FastMCP
 from crawler_worker import main_worker
 
@@ -33,7 +34,7 @@ async def perform_crawl(urls: list[str]):
         return {"error": str(e)}
 
 # --- 1. 初始化 FastMCP ---
-mcp = FastMCP("amazon-crawler")
+mcp = FastMCP("amazon-store-competitor-worker-mcp")
 
 # --- 1.2 处理 HTTP 请求的函数 (Starlette 格式) ---
 async def crawl_api_endpoint(request):
@@ -49,6 +50,7 @@ async def crawl_api_endpoint(request):
 # 注册常规 MCP 工具
 @mcp.tool()
 async def crawl_amazon(urls: list[str]) -> str:
+    """亚马逊店铺竞品追踪与抓包分析：单节点执行抓取任务。"""
     res = await perform_crawl(urls)
     return json.dumps(res, ensure_ascii=False)
 
@@ -67,9 +69,23 @@ if __name__ == "__main__":
         app = mcp.sse_app
         if callable(app) and not hasattr(app, "add_route"):
             app = app()
+
+        allow_origins = [x.strip() for x in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if x.strip()]
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=allow_origins or ["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+            allow_credentials=False,
+        )
             
         # 使用 Starlette 兼容的 add_route 语法添加私有端点
         app.add_route("/crawl", crawl_api_endpoint, methods=["POST"])
+
+        async def health_endpoint(_request):
+            return JSONResponse({"status": "ok", "service": "mcp-worker", "node_type": os.getenv("NODE_TYPE", "both")})
+
+        app.add_route("/", health_endpoint, methods=["GET"])
 
         logger.info(f"Starting in SSE mode on port {args.port}...")
         uvicorn.run(app, host="0.0.0.0", port=args.port)

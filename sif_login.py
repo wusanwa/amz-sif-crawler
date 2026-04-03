@@ -580,7 +580,7 @@ def is_profile_lock_error(exc: Exception) -> bool:
         or "failed to create a processsingleton" in msg
     )
 
-async def run_sif_login(headless=False):
+async def run_sif_login(headless: bool = False):
     logger.info(f"🚀 开始 SIF 自动登录流程 (原地交互版)...")
 
     if not os.path.exists(SIF_PROFILE):
@@ -630,7 +630,9 @@ if __name__ == "__main__":
     parser.add_argument("--no-pack", action="store_true", help="登录完成后不自动打包 profile")
     args = parser.parse_args()
 
-    success = asyncio.run(run_sif_login(headless=args.headless))
+    # 容器环境无 X server，默认强制 headless，避免自动重登直接崩溃
+    effective_headless = args.headless or os.getenv("DOCKER_ENV") == "1"
+    success = asyncio.run(run_sif_login(headless=effective_headless))
     if success and not args.no_pack:
         pack_sif_profile()
     sys.exit(0 if success else 1)

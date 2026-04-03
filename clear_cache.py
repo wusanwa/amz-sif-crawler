@@ -4,7 +4,7 @@ import shutil
 
 # 配置与 batch_crawler_v3_multilayer.py 保持一致
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_DIR = os.path.join(BASE_DIR, "cache_db")
+CACHE_DIR = os.path.join(BASE_DIR, "runtime_data","cache_db")
 
 def clear_cache():
     print(f"🚀 准备清理缓存目录: {CACHE_DIR}")

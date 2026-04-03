@@ -13,6 +13,7 @@ import tempfile
 import shutil
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+from urllib.parse import urlparse
 
 # 配置日志
 logging.basicConfig(
@@ -168,6 +169,53 @@ def safe_get(data, key, default=""):
     return val if val is not None else default
 
 
+def _extract_asin(candidate: str) -> Optional[str]:
+    if not candidate:
+        return None
+    match = re.search(r"\b(B[A-Z0-9]{9})\b", candidate.upper())
+    return match.group(1) if match else None
+
+
+def _build_canonical_amazon_url(asin: str) -> str:
+    return f"https://www.amazon.com/dp/{asin}"
+
+
+def normalize_amazon_input(input_value: Any) -> Dict[str, Any]:
+    """将用户输入统一成可用于 crawl4ai 的 Amazon URL，并尽量提取 ASIN。"""
+    raw = str(input_value or "").strip()
+    if not raw:
+        return {"ok": False, "error": "Empty URL/ASIN"}
+
+    asin_direct = _extract_asin(raw)
+    if asin_direct and re.fullmatch(r"B[A-Z0-9]{9}", raw.upper()):
+        return {"ok": True, "url": _build_canonical_amazon_url(asin_direct), "asin": asin_direct}
+
+    # 兼容缺少 scheme 的常见写法（如 www.amazon.com/...）
+    normalized = raw
+    if re.match(r"^(www\.)", normalized, flags=re.IGNORECASE):
+        normalized = f"https://{normalized}"
+    elif re.match(r"^[a-z0-9.-]+\.[a-z]{2,}(/.*)?$", normalized, flags=re.IGNORECASE):
+        normalized = f"https://{normalized}"
+
+    allowed_prefixes = ("http://", "https://", "file://", "raw:")
+    if not normalized.lower().startswith(allowed_prefixes):
+        if asin_direct:
+            return {"ok": True, "url": _build_canonical_amazon_url(asin_direct), "asin": asin_direct}
+        return {"ok": False, "error": "Invalid URL scheme"}
+
+    asin = asin_direct
+    if normalized.lower().startswith(("http://", "https://")):
+        parsed = urlparse(normalized)
+        host = (parsed.netloc or "").lower()
+        is_amazon = "amazon." in host or host.endswith("amzn.to")
+        if is_amazon and asin:
+            normalized = _build_canonical_amazon_url(asin)
+        elif is_amazon and not asin:
+            return {"ok": False, "error": "Amazon URL missing ASIN"}
+
+    return {"ok": True, "url": normalized, "asin": asin or "UNKNOWN"}
+
+
 def _extract_text_by_id(html_text: str, element_id: str) -> str:
     pattern = rf'id=["\']{re.escape(element_id)}["\'][^>]*>(.*?)</'
     match = re.search(pattern, html_text, flags=re.IGNORECASE | re.DOTALL)
@@ -191,6 +239,108 @@ def _extract_amazon_price(html_text: str) -> str:
     return ""
 
 
+def _coerce_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        match = re.search(r"\d+", value.replace(",", ""))
+        if match:
+            try:
+                return int(match.group(0))
+            except ValueError:
+                return 0
+    return 0
+
+
+def _extract_amazon_parent_item_count(raw_html: str = "", markdown_text: str = "") -> int:
+    candidates: List[int] = []
+    html_text = raw_html or ""
+    md_text = markdown_text or ""
+    merged_text = f"{html_text}\n{md_text}"
+
+    # 1) 直接读取常见字段
+    for pattern in [
+        r'"parent_item_count"\s*:\s*(\d+)',
+        r'"parentItemCount"\s*:\s*(\d+)',
+        r'"totalVariationCount"\s*:\s*(\d+)',
+        r'"totalVariations"\s*:\s*(\d+)',
+        r'"variationCount"\s*:\s*(\d+)',
+    ]:
+        for m in re.finditer(pattern, html_text, flags=re.IGNORECASE):
+            candidates.append(int(m.group(1)))
+
+    # 2) Amazon 常见脚本字段：dimensionValuesDisplayData 的 key 数量
+    m_dim = re.search(
+        r'"dimensionValuesDisplayData"\s*:\s*(\{.*?\})\s*,\s*"',
+        html_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m_dim:
+        try:
+            dim_map = json.loads(m_dim.group(1))
+            if isinstance(dim_map, dict):
+                candidates.append(len(dim_map))
+        except Exception:
+            pass
+
+    # 3) 页面上显式文案，如 "9 options" / "9 variants"
+    for m in re.finditer(r"\b(\d{1,3})\s+(?:options?|variants?)\b", merged_text, flags=re.IGNORECASE):
+        candidates.append(int(m.group(1)))
+
+    # 4) 仅在 variation 区块中统计可选项数量，避免把推荐位误计入
+    variation_blocks = re.findall(
+        r'<[^>]+id=["\']variation_[^"\']+["\'][^>]*>.*?</(?:ul|div)>',
+        html_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for block in variation_blocks:
+        option_count = len(
+            re.findall(
+                r'<li[^>]+(?:data-defaultasin|data-csa-c-item-id|data-value)=',
+                block,
+                flags=re.IGNORECASE,
+            )
+        )
+        if option_count > 0:
+            candidates.append(option_count)
+
+    valid = [x for x in candidates if x > 0]
+    return max(valid) if valid else 0
+
+
+def _normalize_amazon_data(data: dict, raw_html: str = "", markdown_text: str = "") -> dict:
+    if not isinstance(data, dict):
+        return {}
+
+    aliases = [
+        "parent_item_count",
+        "parentItemCount",
+        "total_variants",
+        "total_variant_count",
+        "variant_count",
+        "amazon_total_variants",
+    ]
+
+    count = 0
+    for key in aliases:
+        if key in data:
+            count = max(count, _coerce_int(data.get(key)))
+
+    if count <= 0:
+        count = _extract_amazon_parent_item_count(raw_html=raw_html, markdown_text=markdown_text)
+
+    variants = data.get("variants")
+    if isinstance(variants, list) and variants:
+        count = max(count, len(variants))
+
+    data["parent_item_count"] = max(count, 0)
+    return data
+
+
 def build_amazon_fallback_data(raw_html: str) -> dict:
     title = _extract_text_by_id(raw_html, "productTitle")
     if not title:
@@ -211,7 +361,7 @@ def build_amazon_fallback_data(raw_html: str) -> dict:
         "main_price": _extract_amazon_price(raw_html) or None,
         "model_number": model or None,
         "variants": [],
-        "parent_item_count": 0,
+        "parent_item_count": _extract_amazon_parent_item_count(raw_html=raw_html),
     }
     return data
 
@@ -267,10 +417,27 @@ def detect_sif_auth_state(url: str = "", text: str = "", status_code: Optional[i
     u = (url or "").lower()
     t = (text or "").lower()
 
-    login_signals = [
-        "login", "signin", "sign in",
-        "登录", "重新登录", "请先登录", "在别的浏览器登录",
-        "手机号", "手机号码", "密码", "session expired", "unauthorized",
+    # 明确的未登录/被踢线信号（避免用“登录”这种弱词造成误判）
+    hard_login_signals = [
+        "session expired",
+        "unauthorized",
+        "请先登录",
+        "在别的浏览器登录",
+        "账号异常登录提醒",
+        "为了保证您的账号安全，我们已将您的账号从本浏览器退出",
+        "我知道了重新登录",
+        "手机号",
+        "手机号码",
+        "密码",
+    ]
+    # 常见已登录页面特征（出现时优先判定为 ok）
+    logged_in_markers = [
+        "查销量",
+        "反查流量",
+        "广告透视仪",
+        "流量时光机",
+        "会员购买",
+        "到期",
     ]
     challenge_signals = [
         "captcha", "robot", "verify", "verification",
@@ -283,7 +450,10 @@ def detect_sif_auth_state(url: str = "", text: str = "", status_code: Optional[i
         return "login_required"
     if any(k in t for k in challenge_signals):
         return "challenge"
-    if any(k in t for k in login_signals):
+    # 页面出现明显业务菜单时，优先视为已登录，避免因页面中包含“登录”字样误判
+    if any(k in t for k in logged_in_markers):
+        return "ok"
+    if any(k in t for k in hard_login_signals):
         return "login_required"
     return "ok"
 
@@ -418,6 +588,11 @@ async def fetch_amazon_data_multilayer(
                 log_progress(asin, "✨ AI 正在解析 Amazon JSON 内容...")
                 data = json.loads(res.extracted_content)
                 if isinstance(data, list) and len(data) > 0: data = data[0]
+                data = _normalize_amazon_data(
+                    data,
+                    raw_html=res.cleaned_html or "",
+                    markdown_text=res.markdown or "",
+                )
                 
                 # 3. 最终标题校验
                 if not data.get("product_title"):
@@ -515,8 +690,9 @@ async def fetch_sif_data_multilayer(asin: str, llm_cfg, browser_cfg: BrowserConf
                         extraction_strategy=sif_extract, 
                         markdown_generator=DefaultMarkdownGenerator(content_filter=None), 
                         cache_mode=CacheMode.BYPASS, 
-                        css_selector=".asin-keyword", 
-                        wait_for="css:.asin-keyword",
+                        # 先保证页面可用，避免站点改版/登录重定向导致严格选择器直接超时
+                        css_selector="body", 
+                        wait_for="css:body",
                         wait_until="commit",
                         excluded_tags=['script', 'style', 'path', 'svg', 'nav', 'footer', 'header', 'aside', 'iframe', 'canvas', 'noscript', 'form'],
                         excluded_selector="#header, #footer, .navbar, .sidebar",
@@ -529,6 +705,38 @@ async def fetch_sif_data_multilayer(asin: str, llm_cfg, browser_cfg: BrowserConf
                 timeout=55
             )
             log_progress(asin, f"✨ SIF arun 返回成功: {res.success} | Status: {res.status_code}")
+
+            # 常见拦截判定：重定向到了登录页 或 出现了账号冲突/强制退出提示
+            merged_probe_text = " ".join(
+                filter(
+                    None,
+                    [
+                        getattr(res, "error_message", ""),
+                        res.markdown or "",
+                        res.cleaned_html or "",
+                    ],
+                )
+            )
+            auth_state = detect_sif_auth_state(
+                url=res.url or "",
+                text=merged_probe_text,
+                status_code=res.status_code,
+            )
+            redirect_to_login = auth_state == "login_required"
+            blocked_by_challenge = auth_state == "challenge"
+
+            final_url = (res.url or "").lower()
+            requested_reverse = "/reverse" in sif_url.lower()
+            landed_on_home = final_url.endswith("sif.com/") or final_url.endswith("sif.com")
+            left_reverse_page = requested_reverse and final_url and "/reverse" not in final_url
+            if auth_state == "ok" and (landed_on_home or left_reverse_page):
+                redirect_to_login = True
+
+            if redirect_to_login:
+                return try_refresh_sif_profile(asin)
+            if blocked_by_challenge:
+                log_progress(asin, "❌ SIF 页面触发验证码/风控拦截")
+                return {"data": [], "error": "SIF Challenge/CAPTCHA"}
             
             # --- SIF 快速失败判定 ---
             if not res.success:
@@ -539,30 +747,6 @@ async def fetch_sif_data_multilayer(asin: str, llm_cfg, browser_cfg: BrowserConf
             if res.status_code and res.status_code >= 400:
                 log_progress(asin, f"❌ SIF HTTP 错误: {res.status_code}")
                 return {"data": [], "error": f"SIF HTTP {res.status_code}"}
-            
-            # 常见拦截判定：重定向到了登录页 或 出现了账号冲突/强制退出提示
-            auth_state = detect_sif_auth_state(
-                url=res.url or "",
-                text=" ".join(
-                    filter(
-                        None,
-                        [
-                            getattr(res, "error_message", ""),
-                            res.markdown or "",
-                            res.cleaned_html or "",
-                        ],
-                    )
-                ),
-                status_code=res.status_code,
-            )
-            redirect_to_login = auth_state == "login_required"
-            blocked_by_challenge = auth_state == "challenge"
-
-            if redirect_to_login:
-                return try_refresh_sif_profile(asin)
-            if blocked_by_challenge:
-                log_progress(asin, "❌ SIF 页面触发验证码/风控拦截")
-                return {"data": [], "error": "SIF Challenge/CAPTCHA"}
 
             if res.extracted_content:
                 log_progress(asin, "✨ AI 正在解析 SIF JSON 内容...")
@@ -574,7 +758,11 @@ async def fetch_sif_data_multilayer(asin: str, llm_cfg, browser_cfg: BrowserConf
                     db_cache.set(f"sif_{asin}", rankings, expire=CACHE_EXPIRY_SEC)
                     return {"data": rankings, "error": None}
             
-            err = getattr(res, 'error_message', '未找到 SIF 排名或内容为空')
+            # 页面已加载但没有排名，优先提示登录失效，避免误导为普通空数据
+            if "asin-keyword" not in (res.cleaned_html or "").lower():
+                return {"data": [], "error": "SIF Login Required"}
+
+            err = getattr(res, 'error_message', '') or '未找到 SIF 排名或内容为空'
             log_progress(asin, f"❌ SIF 抓取失败: {err}")
             return {"data": [], "error": err}
     except asyncio.TimeoutError:
@@ -641,6 +829,42 @@ async def main_worker(manual_urls: Optional[List[str]] = None, debug_mode: Optio
         if not urls:
             sys.stderr.write("⚠️ 未提供待处理的 URL，程序退出。\n")
             return []
+
+        normalized_inputs: List[Dict[str, str]] = []
+        for raw_input in urls:
+            normalized = normalize_amazon_input(raw_input)
+            if normalized.get("ok"):
+                normalized_inputs.append(
+                    {
+                        "url": normalized.get("url", ""),
+                        "asin": normalized.get("asin", "UNKNOWN"),
+                        "raw": str(raw_input),
+                    }
+                )
+                continue
+
+            asin = _extract_asin(str(raw_input or "")) or "UNKNOWN"
+            reason = normalized.get("error", "Invalid input")
+            log_progress(asin, f"❌ 输入无效，已跳过: {raw_input} | 原因: {reason}")
+            results.append(
+                {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "asin": asin,
+                    "status": "PARTIAL",
+                    "failure_reason": f"Invalid Input: {reason}",
+                    "amazon_title": "",
+                    "amazon_price": "",
+                    "amazon_model": "",
+                    "amazon_total_variants": 0,
+                    "amazon_variants": [],
+                    "sif_1_kw": "",
+                    "full_sif": [],
+                }
+            )
+
+        if not normalized_inputs:
+            sys.stderr.write("⚠️ 输入均无效，程序退出。\n")
+            return results
         
         batch_s = SETTINGS.get("BATCH", {})
         # 处理输出文件路径
@@ -649,11 +873,11 @@ async def main_worker(manual_urls: Optional[List[str]] = None, debug_mode: Optio
             if not os.path.isabs(current_outfile):
                 current_outfile = os.path.join(BASE_DIR, current_outfile)
 
-        for i, url in enumerate(urls, 1):
+        for i, item in enumerate(normalized_inputs, 1):
             t0 = time.time()
-            asin_match = re.search(r'/dp/([A-Z0-9]{10})', url)
-            asin = asin_match.group(1) if asin_match else "UNKNOWN"
-            log_progress(asin, f"🚀 开始处理项目 [{i}/{len(urls)}] | URL: {url}")
+            url = item.get("url", "")
+            asin = item.get("asin", "UNKNOWN")
+            log_progress(asin, f"🚀 开始处理项目 [{i}/{len(normalized_inputs)}] | URL: {url}")
             
             try:
                 # --- 步骤 1: Amazon (仅当任务类型为 both 或 amazon) ---
@@ -685,7 +909,7 @@ async def main_worker(manual_urls: Optional[List[str]] = None, debug_mode: Optio
                 extra_errors = []
                 if task_type in ["both", "amazon"] and not safe_get(amazon_data, "product_title"):
                     extra_errors.append("Amazon Empty Data")
-                if task_type in ["both", "sif"] and not sif_rankings:
+                if task_type in ["both", "sif"] and not sif_rankings and not sif_res.get("error"):
                     extra_errors.append("SIF Empty Data")
                 combined_error = "; ".join(
                     filter(None, [amz_res.get("error"), sif_res.get("error"), *extra_errors])
@@ -713,7 +937,7 @@ async def main_worker(manual_urls: Optional[List[str]] = None, debug_mode: Optio
                         f.flush()
                 
                 elapsed = round(time.time() - t0, 1)
-                print(f"✓ {i}/{len(urls)} [{asin}] {elapsed}s | Err: {combined_error or 'None'}")
+                print(f"✓ {i}/{len(normalized_inputs)} [{asin}] {elapsed}s | Err: {combined_error or 'None'}")
 
             except Exception as e:
                 sys.stderr.write(f"💥 循环内异常: {str(e)}\n")

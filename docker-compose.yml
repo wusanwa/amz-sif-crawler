@@ -11,6 +11,7 @@ services:
       - AMZ_WORKER_URL=http://amazon-worker:8000
       - SIF_WORKER_URL=http://sif-worker:8000
       - GATEWAY_MODE=parallel
+      - CORS_ALLOW_ORIGINS=*
     depends_on:
       - amazon-worker
       - sif-worker
@@ -24,6 +25,7 @@ services:
       - PYTHONUNBUFFERED=1
       - DOCKER_ENV=1
       - CACHE_DIR=/app/cache_db
+      - CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
     command: ["bash", "/app/scripts/worker_entrypoint.sh"]
     volumes:
       - ./runtime_data/profiles/amazon:/app/profiles/amazon:ro
@@ -38,6 +40,7 @@ services:
       - PYTHONUNBUFFERED=1
       - DOCKER_ENV=1
       - CACHE_DIR=/app/cache_db
+      - CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
     command: ["bash", "/app/scripts/worker_entrypoint.sh"]
     volumes:
       - ./runtime_data/profiles/sif:/app/profiles/sif:ro

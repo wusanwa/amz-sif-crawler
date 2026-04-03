@@ -4,13 +4,14 @@ import json
 import logging
 import os
 import uvicorn
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
+from starlette.middleware.cors import CORSMiddleware
 from mcp.server.fastmcp import FastMCP
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp-gateway")
 
-mcp = FastMCP("amazon-crawler-gateway")
+mcp = FastMCP("amazon-store-competitor-intelligence-mcp")
 
 # --- 配置区 ---
 AMZ_WORKER_BASE = os.getenv("AMZ_WORKER_URL", "http://amazon-worker:8000" if os.getenv("DOCKER_ENV") else "http://localhost:8001")
@@ -26,6 +27,51 @@ EFFECTIVE_GATEWAY_MODE = "parallel" if IN_DOCKER else GATEWAY_MODE
 logger.info(
     f"⚙️ Config: AMZ_WORKER={AMZ_WORKER_BASE} | SIF_WORKER={SIF_WORKER_BASE} | MODE={EFFECTIVE_GATEWAY_MODE}"
 )
+
+def _normalize_asin_key(value: str) -> str:
+    return str(value or "UNKNOWN").strip().upper() or "UNKNOWN"
+
+
+def _merge_failure_reason(*parts: str) -> str:
+    merged = []
+    for part in parts:
+        text = str(part or "").strip()
+        if not text:
+            continue
+        # 兼容上游已拼接的 "; " 字符串，按片段去重，避免重复 "SIF Empty Data"
+        for seg in [x.strip() for x in text.split(";") if x.strip()]:
+            if seg not in merged:
+                merged.append(seg)
+    return "; ".join(merged)
+
+
+class LenientOptionsMiddleware:
+    """放宽 OPTIONS 处理，兼容部分 MCP 客户端的非标准预检请求。
+
+    使用原生 ASGI 中间件，避免 BaseHTTPMiddleware 对 SSE 流式响应的兼容问题。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("method") == "OPTIONS":
+            headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+            origin = headers.get("origin", "*")
+            req_headers = headers.get("access-control-request-headers", "*")
+            response = Response(
+                status_code=204,
+                headers={
+                    "access-control-allow-origin": origin,
+                    "access-control-allow-methods": "GET,POST,OPTIONS,PUT,PATCH,DELETE,HEAD",
+                    "access-control-allow-headers": req_headers,
+                    "access-control-max-age": "600",
+                    "vary": "Origin",
+                },
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 async def perform_unified_crawl(urls: list[str]):
     """核心逻辑封装，供 MCP Tool 和 HTTP API 共享"""
@@ -83,15 +129,60 @@ async def perform_unified_crawl(urls: list[str]):
         sif_data = sif_resp.json().get("results", [])
         logger.info(f"✅ SIF Worker 返回 {len(sif_data)} 条结果")
     
-    # 建立 SIF 映射 (ASIN -> Rankings)
-    sif_map = {item['asin']: item.get('full_sif', []) for item in sif_data if 'asin' in item}
+    # 建立 SIF 映射 (ASIN -> 完整记录)
+    sif_item_map = {}
+    for item in sif_data:
+        if not isinstance(item, dict):
+            continue
+        asin_key = _normalize_asin_key(item.get("asin", "UNKNOWN"))
+        sif_item_map[asin_key] = item
     
     final_results = []
     # 如果 AMZ 有结果，以 AMZ 为主合并 SIF
     if amz_data:
         for amz_item in amz_data:
-            asin = amz_item.get('asin', 'UNKNOWN')
-            amz_item['full_sif'] = sif_map.get(asin, [])
+            if not isinstance(amz_item, dict):
+                continue
+
+            asin_key = _normalize_asin_key(amz_item.get("asin", "UNKNOWN"))
+            sif_item = sif_item_map.get(asin_key, {})
+            sif_rankings = sif_item.get("full_sif", []) if isinstance(sif_item, dict) else []
+            if not isinstance(sif_rankings, list):
+                sif_rankings = []
+
+            amz_item["full_sif"] = sif_rankings
+            sif_1_kw = ""
+            if isinstance(sif_item, dict):
+                sif_1_kw = str(sif_item.get("sif_1_kw", "") or "")
+            if not sif_1_kw and sif_rankings and isinstance(sif_rankings[0], dict):
+                sif_1_kw = str(sif_rankings[0].get("keyword", "") or "")
+            amz_item["sif_1_kw"] = sif_1_kw
+
+            amz_status = str(amz_item.get("status", "SUCCESS")).upper()
+            merged_status = amz_status if amz_status in ("SUCCESS", "PARTIAL", "FAILED") else "SUCCESS"
+            merged_reason = str(amz_item.get("failure_reason", "") or "")
+
+            if sif_error_reason:
+                merged_status = "PARTIAL"
+                merged_reason = _merge_failure_reason(merged_reason, sif_error_reason)
+            else:
+                if not sif_item:
+                    merged_status = "PARTIAL"
+                    merged_reason = _merge_failure_reason(merged_reason, "SIF Missing Result")
+                else:
+                    sif_status = str(sif_item.get("status", "")).upper()
+                    sif_reason = str(sif_item.get("failure_reason", "") or "")
+                    if sif_status and sif_status != "SUCCESS":
+                        merged_status = "PARTIAL"
+                    if sif_reason:
+                        merged_status = "PARTIAL"
+                        merged_reason = _merge_failure_reason(merged_reason, sif_reason)
+                    if not sif_rankings and not sif_reason:
+                        merged_status = "PARTIAL"
+                        merged_reason = _merge_failure_reason(merged_reason, "SIF Empty Data")
+
+            amz_item["status"] = merged_status
+            amz_item["failure_reason"] = merged_reason
             final_results.append(amz_item)
     # 如果 AMZ 没结果但 SIF 有结果，把 SIF 的结果也补充进去（可选，通常是以 AMZ 为主）
     elif sif_data:
@@ -100,7 +191,11 @@ async def perform_unified_crawl(urls: list[str]):
             if not isinstance(item, dict):
                 continue
             old_reason = item.get("failure_reason", "")
-            merged_reason = "; ".join(filter(None, [old_reason, amz_error_reason or "AMZ Worker No Data"]))
+            if not item.get("sif_1_kw") and isinstance(item.get("full_sif"), list) and item["full_sif"]:
+                first = item["full_sif"][0]
+                if isinstance(first, dict):
+                    item["sif_1_kw"] = first.get("keyword", "") or ""
+            merged_reason = _merge_failure_reason(old_reason, amz_error_reason or "AMZ Worker No Data")
             item["status"] = "PARTIAL"
             item["failure_reason"] = merged_reason
         final_results = sif_data
@@ -109,7 +204,8 @@ async def perform_unified_crawl(urls: list[str]):
 
 # 注册为 MCP 工具
 @mcp.tool()
-async def crawl_batch_unified(urls: list[str]) -> str:
+async def track_competitor_intelligence(urls: list[str]) -> str:
+    """亚马逊店铺竞品追踪与抓包分析：并行调度 Amazon/SIF 数据并按 ASIN 聚合返回。"""
     res = await perform_unified_crawl(urls)
     return json.dumps(res, ensure_ascii=False)
 
@@ -120,6 +216,17 @@ if __name__ == "__main__":
     if callable(app):
         app = app()
 
+    allow_origins = [x.strip() for x in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if x.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allow_origins or ["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=False,
+    )
+    # 置于最外层，确保所有 OPTIONS（含非标准预检）都返回 204 而非 400。
+    app.add_middleware(LenientOptionsMiddleware)
+
     # 添加直接的 HTTP 测试入口：POST /crawl
     async def http_test_endpoint(request):
         data = await request.json()
@@ -127,7 +234,11 @@ if __name__ == "__main__":
         res = await perform_unified_crawl(urls)
         return JSONResponse(res)
 
+    async def health_endpoint(_request):
+        return JSONResponse({"status": "ok", "service": "mcp-gateway"})
+
     app.add_route("/crawl", http_test_endpoint, methods=["POST"])
+    app.add_route("/", health_endpoint, methods=["GET"])
 
     logger.info(f"Starting Gateway on port {port}...")
     uvicorn.run(app, host="0.0.0.0", port=port)
