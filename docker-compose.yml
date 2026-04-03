@@ -1,0 +1,43 @@
+services:
+  # 网关中心 (并发指挥官)
+  mcp-gateway:
+    build: .
+    container_name: mcp-gateway
+    ports:
+      - "8888:8888"
+    command: ["python3", "mcp_gateway.py"]
+    environment:
+      - DOCKER_ENV=1
+      - AMZ_WORKER_URL=http://amazon-worker:8000
+      - SIF_WORKER_URL=http://sif-worker:8000
+      - GATEWAY_MODE=parallel
+    depends_on:
+      - amazon-worker
+      - sif-worker
+    restart: unless-stopped
+
+  # Amazon 专用节点 (持有 Amazon Profile 登录状态)
+  amazon-worker:
+    build: .
+    environment:
+      - NODE_TYPE=amazon
+      - PYTHONUNBUFFERED=1
+      - DOCKER_ENV=1
+    command: ["bash", "/app/scripts/worker_entrypoint.sh"]
+    volumes:
+      - ./data/amazon/profiles/amazon:/app/profiles/amazon:ro
+      - ./data/amazon/cache_db:/app/cache_db
+    restart: unless-stopped
+
+  # SIF 专用节点 (持有 SIF Profile 登录状态)
+  sif-worker:
+    build: .
+    environment:
+      - NODE_TYPE=sif
+      - PYTHONUNBUFFERED=1
+      - DOCKER_ENV=1
+    command: ["bash", "/app/scripts/worker_entrypoint.sh"]
+    volumes:
+      - ./data/sif/profiles/sif:/app/profiles/sif:ro
+      - ./data/sif/cache_db:/app/cache_db
+    restart: unless-stopped

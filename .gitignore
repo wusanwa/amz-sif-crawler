@@ -1,0 +1,25 @@
+# Python cache/venv
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Local runtime data
+profiles/
+data/
+*.log
+archive_ref_*/
+
+# Local config/secrets
+config/settings.json
+*.local.json
+
+# Local tool metadata
+.codex
+
+# IDE/OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo

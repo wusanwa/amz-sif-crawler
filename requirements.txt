@@ -1,0 +1,11 @@
+mcp[fastmcp]
+crawl4ai
+pydantic
+litellm
+diskcache
+playwright
+fastapi
+uvicorn
+asyncio
+typing-extensions
+httpx

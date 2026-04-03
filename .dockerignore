@@ -1,0 +1,25 @@
+.git
+.gitignore
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# Runtime data / profiles (host-mounted by docker-compose volumes)
+data/
+amazon_profile/
+sif_profile/
+cache_db/
+
+# Tooling / local artifacts
+.old/
+.codex
+node_modules/
+dist/
+build/
