@@ -2,6 +2,7 @@
 import sys
 import os
 import argparse
+import subprocess
 from playwright.sync_api import Error, sync_playwright
 
 
@@ -98,6 +99,7 @@ if __name__ == "__main__":
     parser.add_argument("--amazon", action="store_true", help="配置 Amazon Profile (地区/验证码)")
     parser.add_argument("--sif", action="store_true", help="配置 SIF Profile (手动登录)")
     parser.add_argument("--auto-sif", action="store_true", help="自动执行 SIF 登录 (自动补全账号密码)")
+    parser.add_argument("--no-pack", action="store_true", help="配置完成后不自动打包 profile 压缩包")
     parser.add_argument(
         "--force-unlock",
         action="store_true",
@@ -107,20 +109,35 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     base_dir = os.path.dirname(os.path.abspath(__file__))
+    runtime_root = os.getenv("APP_RUNTIME_ROOT", os.path.join(base_dir, "runtime_data"))
+    profile_root = os.getenv("PROFILE_ROOT_DIR", os.path.join(runtime_root, "profiles"))
+    bundle_script = os.path.join(base_dir, "scripts", "profile_bundle.sh")
+
+    def pack_profile(target_name):
+        if args.no_pack:
+            print(f"[INFO] 已跳过自动打包（--no-pack）：{target_name}")
+            return
+        if not os.path.exists(bundle_script):
+            print(f"[WARN] 未找到打包脚本，跳过：{bundle_script}")
+            return
+        print(f"[INFO] 正在打包 {target_name} profile 压缩包...")
+        subprocess.run(["bash", bundle_script, "pack", target_name], check=False)
     
     if args.amazon:
-        path = os.path.join(base_dir, "data", "amazon", "profiles", "amazon")
+        path = os.path.join(profile_root, "amazon")
         target = "https://www.amazon.com"
         open_profile(path, target, "Amazon", force_unlock=args.force_unlock)
+        pack_profile("amazon")
     elif args.sif:
-        path = os.path.join(base_dir, "data", "sif", "profiles", "sif")
+        path = os.path.join(profile_root, "sif")
         target = "https://www.sif.com/reverse?country=US&asin=B0CDX5XGLK&isListingSearch=0"
         open_profile(path, target, "SIF", force_unlock=args.force_unlock)
+        pack_profile("sif")
     elif args.auto_sif:
-        import subprocess
         log_script = os.path.join(base_dir, "sif_login.py")
         print("\n[INFO] 正在启动自动登录...")
         # 此时可以用 headless=False 让用户看到过程
         subprocess.run([sys.executable, log_script])
+        pack_profile("sif")
     else:
         parser.print_help()

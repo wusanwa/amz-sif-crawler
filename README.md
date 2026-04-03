@@ -29,10 +29,10 @@
 
 ### 1.2 初始化浏览器 Profile（宿主机执行）
 
-Docker worker 使用挂载目录中的持久化 profile：
+项目已改为“压缩包入库 + 运行时解压”模式：
 
-- `./data/amazon/profiles/amazon`
-- `./data/sif/profiles/sif`
+- 本地存放：`./profile_bundles/amazon.tar.gz`、`./profile_bundles/sif.tar.gz`（默认不提交）
+- 运行时目录：`./runtime_data/profiles/amazon`、`./runtime_data/profiles/sif`
 
 首次使用请在宿主机执行：
 
@@ -45,6 +45,15 @@ cd <project-root>
 
 # SIF（手动登录）
 .venv/bin/python setup_profiles.py --sif
+
+# 生成/更新本地压缩包
+bash scripts/profile_bundle.sh pack all
+```
+
+部署前自动解压（`deploy.sh` 和 `docker_deploy.sh` 已内置）：
+
+```bash
+bash scripts/profile_bundle.sh unpack all
 ```
 
 如果 profile 目录存在残留锁文件：
@@ -56,6 +65,9 @@ cd <project-root>
 ## 2. 启动服务（Docker Compose）
 
 ```bash
+# 若仓库内已有 profile 压缩包，可先恢复到 runtime_data
+bash scripts/profile_bundle.sh unpack all
+
 docker compose up -d --build
 ```
 
@@ -117,7 +129,9 @@ curl -X POST http://localhost:8888/crawl \
 - [crawler_worker.py](crawler_worker.py)：核心抓取逻辑
 - [setup_profiles.py](setup_profiles.py)：profile 初始化与修复
 - [config/settings.json](config/settings.json)：运行配置
-- `data/amazon/*`、`data/sif/*`：持久化 profile 与缓存
+- `profile_bundles/*.tar.gz`：本地 profile 压缩包（默认忽略提交）
+- `runtime_data/profiles/*`：运行时解压 profile（默认忽略提交）
+- `runtime_data/cache_db/*`：运行时缓存（默认忽略提交）
 - [archive_ref_2026-04-02](archive_ref_2026-04-02)：归档的历史文件
 
 ## 6. 常见问题
@@ -129,8 +143,8 @@ curl -X POST http://localhost:8888/crawl \
 修复目录权限后重试：
 
 ```bash
-sudo chown -R $USER:$USER ./data/sif/profiles/sif
-chmod -R u+rwX ./data/sif/profiles/sif
+sudo chown -R $USER:$USER ./runtime_data/profiles/sif
+chmod -R u+rwX ./runtime_data/profiles/sif
 ```
 
 Amazon profile 同理处理对应目录。

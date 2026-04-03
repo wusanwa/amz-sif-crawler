@@ -23,10 +23,11 @@ services:
       - NODE_TYPE=amazon
       - PYTHONUNBUFFERED=1
       - DOCKER_ENV=1
+      - CACHE_DIR=/app/cache_db
     command: ["bash", "/app/scripts/worker_entrypoint.sh"]
     volumes:
-      - ./data/amazon/profiles/amazon:/app/profiles/amazon:ro
-      - ./data/amazon/cache_db:/app/cache_db
+      - ./runtime_data/profiles/amazon:/app/profiles/amazon:ro
+      - ./runtime_data/cache_db/amazon:/app/cache_db
     restart: unless-stopped
 
   # SIF 专用节点 (持有 SIF Profile 登录状态)
@@ -36,8 +37,9 @@ services:
       - NODE_TYPE=sif
       - PYTHONUNBUFFERED=1
       - DOCKER_ENV=1
+      - CACHE_DIR=/app/cache_db
     command: ["bash", "/app/scripts/worker_entrypoint.sh"]
     volumes:
-      - ./data/sif/profiles/sif:/app/profiles/sif:ro
-      - ./data/sif/cache_db:/app/cache_db
+      - ./runtime_data/profiles/sif:/app/profiles/sif:ro
+      - ./runtime_data/cache_db/sif:/app/cache_db
     restart: unless-stopped

@@ -1,8 +1,14 @@
 #!/bin/bash
 
 # --- 1. 创建宿主机持久化目录 ---
-mkdir -p data/node1/profiles data/node1/cache_db
-mkdir -p data/node2/profiles data/node2/cache_db
+mkdir -p runtime_data/profiles/amazon runtime_data/profiles/sif
+mkdir -p runtime_data/cache_db/amazon runtime_data/cache_db/sif
+mkdir -p profile_bundles
+
+# --- 1.1 若仓库内有压缩包，先解压到运行目录 ---
+if [ -x scripts/profile_bundle.sh ]; then
+  bash scripts/profile_bundle.sh unpack all
+fi
 
 # --- 2. 路径规范提示 ---
 # 项目统一使用相对路径/运行时路径，不再依赖宿主机绝对目录。
@@ -31,4 +37,5 @@ echo "💡 注意：由于使用了持久化上下文(Profile)，"
 echo "   如果需要手动配置 Amazon/SIF 验证码或登录，"
 echo "   请分别在各自容器内运行交互式 setup_profiles 命令："
 echo "   docker exec -it crawler-iso-1 python3 setup_profiles.py --amazon"
+echo "   配置完成后可执行: bash scripts/profile_bundle.sh pack all"
 echo "=============================================="

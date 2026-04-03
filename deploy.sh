@@ -5,6 +5,8 @@ VENV_NAME=".venv"
 PYTHON_BIN="python3"
 PORT=8000
 MODE="sse" # 默认使用 SSE 模式，适合远程调用
+RUNTIME_ROOT="runtime_data"
+PROFILE_ROOT="${RUNTIME_ROOT}/profiles"
 
 # --- 颜色定义 ---
 GREEN='\033[0;32m'
@@ -90,6 +92,12 @@ if [ $? -eq 0 ]; then
 fi
 echo -e "${GREEN}[SUCCESS] 浏览器安装完成。${NC}"
 
+# 4.1 从仓库压缩包恢复 Profile（如存在）
+if [ -x "scripts/profile_bundle.sh" ]; then
+    echo -e "${YELLOW}[INFO] 正在尝试从 profile_bundles 解压浏览器 Profile...${NC}"
+    bash scripts/profile_bundle.sh unpack all
+fi
+
 # 5. 检查配置文件
 if [ ! -f "config/settings.json" ]; then
     echo -e "${YELLOW}[WARNING] 未发现 config/settings.json，请手动根据 README.md 创建并配置 API KEY。${NC}"
@@ -100,12 +108,13 @@ fi
 
 # 6. 检查浏览器 Profile
 echo -e "${YELLOW}[INFO] 正在检查浏览器 Profiles...${NC}"
-if [ ! -d "profiles/amazon" ] || [ ! -d "profiles/sif" ]; then
+if [ ! -d "${PROFILE_ROOT}/amazon" ] || [ ! -d "${PROFILE_ROOT}/sif" ]; then
     echo -e "${YELLOW}[IMPORTANT] 检测到部分浏览器配置(Profile)缺失。${NC}"
     echo -e "${YELLOW}由于涉及验证码或人工登录，请在部署完成后手动执行以下命令进行初始化：${NC}"
     echo -e "${BLUE}  source $VENV_NAME/bin/activate${NC}"
     echo -e "${BLUE}  python setup_profiles.py --amazon  # 修改地区或处理验证码${NC}"
     echo -e "${BLUE}  python setup_profiles.py --sif     # 完成 SIF 登录${NC}"
+    echo -e "${BLUE}  bash scripts/profile_bundle.sh pack all  # 打包后可提交到 Git${NC}"
 fi
 
 # 7. 启动服务提示

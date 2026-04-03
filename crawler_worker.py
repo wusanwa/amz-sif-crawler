@@ -66,15 +66,17 @@ def load_settings():
 
 SETTINGS = load_settings()
 
-# 基础路径配置（允许容器启动脚本注入实例级私有 Profile 目录）
-# BASE_DIR = SETTINGS.get("BASE_DIR", BASE_DIR) # 用户仍可在 JSON 中覆盖，但默认自动探测
-AMAZON_PROFILE = os.getenv("AMAZON_PROFILE_DIR", os.path.join(BASE_DIR, "profiles", "amazon"))
-SIF_PROFILE = os.getenv("SIF_PROFILE_DIR", os.path.join(BASE_DIR, "profiles", "sif"))
-CACHE_DIR = os.path.join(BASE_DIR, "cache_db")
+# 基础路径配置（统一使用 runtime_data，允许环境变量覆盖）
+RUNTIME_ROOT = os.getenv("APP_RUNTIME_ROOT", os.path.join(BASE_DIR, "runtime_data"))
+PROFILE_ROOT = os.getenv("PROFILE_ROOT_DIR", os.path.join(RUNTIME_ROOT, "profiles"))
+AMAZON_PROFILE = os.getenv("AMAZON_PROFILE_DIR", os.path.join(PROFILE_ROOT, "amazon"))
+SIF_PROFILE = os.getenv("SIF_PROFILE_DIR", os.path.join(PROFILE_ROOT, "sif"))
+CACHE_DIR = os.getenv("CACHE_DIR", os.path.join(RUNTIME_ROOT, "cache_db"))
 CACHE_EXPIRY_SEC = SETTINGS.get("CACHE_EXPIRY_SEC", 80000)
 DEBUG_MODE = False # Default, will be updated in main_worker
 
 # 初始化高性能缓存
+os.makedirs(CACHE_DIR, exist_ok=True)
 db_cache = diskcache.Cache(CACHE_DIR)
 
 # 数据模型

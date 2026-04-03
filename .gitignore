@@ -7,6 +7,7 @@ __pycache__/
 # Local runtime data
 profiles/
 data/
+runtime_data/
 *.log
 archive_ref_*/
 
@@ -23,3 +24,8 @@ config/settings.json
 .DS_Store
 *.swp
 *.swo
+
+# Keep only placeholder in Git; archives stay local
+!profile_bundles/
+!profile_bundles/.gitkeep
+profile_bundles/*.tar.gz

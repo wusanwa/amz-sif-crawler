@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import inspect
+import argparse
+import subprocess
 import tempfile
 import shutil
 from typing import Optional, List, Any
@@ -23,7 +25,9 @@ except ImportError:
 # 配置基础路径
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config", "settings.json")
-SIF_PROFILE = os.path.join(BASE_DIR, "profiles", "sif")
+RUNTIME_ROOT = os.getenv("APP_RUNTIME_ROOT", os.path.join(BASE_DIR, "runtime_data"))
+PROFILE_ROOT = os.getenv("PROFILE_ROOT_DIR", os.path.join(RUNTIME_ROOT, "profiles"))
+SIF_PROFILE = os.getenv("SIF_PROFILE_DIR", os.path.join(PROFILE_ROOT, "sif"))
 
 # 日志配置
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -612,6 +616,21 @@ async def run_sif_login(headless=False):
             if temp_profile_dir and profile_dir == temp_profile_dir:
                 shutil.rmtree(temp_profile_dir, ignore_errors=True)
 
+def pack_sif_profile() -> None:
+    bundle_script = os.path.join(BASE_DIR, "scripts", "profile_bundle.sh")
+    if not os.path.exists(bundle_script):
+        logger.warning(f"⚠️ 未找到打包脚本，跳过自动打包: {bundle_script}")
+        return
+    logger.info("📦 正在打包 SIF profile 压缩包...")
+    subprocess.run(["bash", bundle_script, "pack", "sif"], check=False)
+
 if __name__ == "__main__":
-    success = asyncio.run(run_sif_login(headless=False))
+    parser = argparse.ArgumentParser(description="SIF 自动登录脚本")
+    parser.add_argument("--headless", action="store_true", help="使用 headless 模式运行")
+    parser.add_argument("--no-pack", action="store_true", help="登录完成后不自动打包 profile")
+    args = parser.parse_args()
+
+    success = asyncio.run(run_sif_login(headless=args.headless))
+    if success and not args.no_pack:
+        pack_sif_profile()
     sys.exit(0 if success else 1)
