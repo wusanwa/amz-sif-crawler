@@ -11,13 +11,15 @@ from mcp.server.fastmcp import FastMCP
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp-gateway")
 
-mcp = FastMCP("amazon-store-competitor-intelligence-mcp")
-
 # --- 配置区 ---
+GATEWAY_HOST = os.getenv("GATEWAY_HOST", "0.0.0.0").strip() or "0.0.0.0"
 AMZ_WORKER_BASE = os.getenv("AMZ_WORKER_URL", "http://amazon-worker:8000" if os.getenv("DOCKER_ENV") else "http://localhost:8001")
 SIF_WORKER_BASE = os.getenv("SIF_WORKER_URL", "http://sif-worker:8000" if os.getenv("DOCKER_ENV") else "http://localhost:8002")
 GATEWAY_MODE = os.getenv("GATEWAY_MODE", "parallel").strip().lower()
 IN_DOCKER = os.getenv("DOCKER_ENV") == "1"
+
+# 显式设置 FastMCP host，避免默认 127.0.0.1 触发 DNS rebinding 防护导致 IP 访问返回 421。
+mcp = FastMCP("amazon-store-competitor-intelligence-mcp", host=GATEWAY_HOST)
 
 # Docker 运行形态下强制并行，避免配置漂移导致 Amazon/SIF 退化为串行。
 if IN_DOCKER and GATEWAY_MODE != "parallel":
@@ -25,7 +27,7 @@ if IN_DOCKER and GATEWAY_MODE != "parallel":
 EFFECTIVE_GATEWAY_MODE = "parallel" if IN_DOCKER else GATEWAY_MODE
 
 logger.info(
-    f"⚙️ Config: AMZ_WORKER={AMZ_WORKER_BASE} | SIF_WORKER={SIF_WORKER_BASE} | MODE={EFFECTIVE_GATEWAY_MODE}"
+    f"⚙️ Config: HOST={GATEWAY_HOST} | AMZ_WORKER={AMZ_WORKER_BASE} | SIF_WORKER={SIF_WORKER_BASE} | MODE={EFFECTIVE_GATEWAY_MODE}"
 )
 
 def _normalize_asin_key(value: str) -> str:
@@ -241,4 +243,4 @@ if __name__ == "__main__":
     app.add_route("/", health_endpoint, methods=["GET"])
 
     logger.info(f"Starting Gateway on port {port}...")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host=GATEWAY_HOST, port=port)
