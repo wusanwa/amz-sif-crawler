@@ -25,6 +25,7 @@ services:
       - PYTHONUNBUFFERED=1
       - DOCKER_ENV=1
       - CACHE_DIR=/app/cache_db
+      - DISABLE_CACHE=1
       - CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
     command: ["bash", "/app/scripts/worker_entrypoint.sh"]
     volumes:
@@ -40,6 +41,7 @@ services:
       - PYTHONUNBUFFERED=1
       - DOCKER_ENV=1
       - CACHE_DIR=/app/cache_db
+      - DISABLE_CACHE=1
       - CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
     command: ["bash", "/app/scripts/worker_entrypoint.sh"]
     volumes:

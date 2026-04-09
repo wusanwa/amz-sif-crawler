@@ -41,10 +41,10 @@
 cd <project-root>
 
 # Amazon（处理地区/验证码）
-.venv/bin/python setup_profiles.py --amazon
+bash scripts/setup_amazon_manual.sh
 
 # SIF（手动登录）
-.venv/bin/python setup_profiles.py --sif
+bash scripts/setup_sif_manual.sh
 
 # 生成/更新本地压缩包
 bash scripts/profile_bundle.sh pack all
@@ -59,7 +59,7 @@ bash scripts/profile_bundle.sh unpack all
 如果 profile 目录存在残留锁文件：
 
 ```bash
-.venv/bin/python setup_profiles.py --sif --force-unlock
+bash scripts/setup_sif_manual.sh --force-unlock
 ```
 
 ## 2. 启动服务（Docker Compose）
