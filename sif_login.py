@@ -580,6 +580,33 @@ def is_profile_lock_error(exc: Exception) -> bool:
         or "failed to create a processsingleton" in msg
     )
 
+def is_missing_playwright_browser_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "executable doesn't exist" in msg
+        or "please run the following command to download new browsers" in msg
+        or "playwright install" in msg
+    )
+
+def install_playwright_browser(browser_name: str = "chromium") -> bool:
+    logger.info(f"🧩 检测到 Playwright 浏览器缺失，尝试自动安装: {browser_name}")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", browser_name],
+            check=False,
+        )
+        if result.returncode == 0:
+            logger.info(f"✅ Playwright 浏览器安装完成: {browser_name}")
+            return True
+    except Exception as e:
+        logger.error(f"❌ 自动安装 Playwright 浏览器失败: {e}")
+
+    logger.error(
+        "❌ 仍未完成浏览器安装，请手动执行: "
+        f"{sys.executable} -m playwright install {browser_name}"
+    )
+    return False
+
 async def run_sif_login(headless: bool = False):
     logger.info(f"🚀 开始 SIF 自动登录流程 (原地交互版)...")
 
@@ -602,6 +629,15 @@ async def run_sif_login(headless: bool = False):
             async with AsyncWebCrawler(config=browser_cfg) as crawler:
                 return await run_login_flow(crawler)
         except Exception as e:
+            if is_missing_playwright_browser_error(e):
+                installed = install_playwright_browser("chromium")
+                if installed:
+                    logger.info("🔁 浏览器安装成功，重新启动登录流程...")
+                    async with AsyncWebCrawler(config=browser_cfg) as crawler:
+                        return await run_login_flow(crawler)
+                raise RuntimeError(
+                    "Playwright Chromium 未安装，且自动安装失败。"
+                ) from e
             # 持久化 profile 被占用时，自动切换临时 profile 重试一次
             if idx == 0 and is_profile_lock_error(e):
                 temp_profile_dir = tempfile.mkdtemp(prefix="sif-fallback-", dir="/tmp")
@@ -628,7 +664,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SIF 自动登录脚本")
     parser.add_argument("--headless", action="store_true", help="使用 headless 模式运行")
     parser.add_argument("--no-pack", action="store_true", help="登录完成后不自动打包 profile")
+    parser.add_argument(
+        "--install-browser-only",
+        action="store_true",
+        help="仅安装 Playwright Chromium 浏览器，不执行登录流程",
+    )
     args = parser.parse_args()
+
+    if args.install_browser_only:
+        ok = install_playwright_browser("chromium")
+        sys.exit(0 if ok else 1)
 
     # 容器环境无 X server，默认强制 headless，避免自动重登直接崩溃
     effective_headless = args.headless or os.getenv("DOCKER_ENV") == "1"

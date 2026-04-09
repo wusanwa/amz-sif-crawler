@@ -9,7 +9,7 @@ profiles/
 data/
 runtime_data/
 *.log
-
+node_modules/
 # Local config/secrets
 *.local.json
 

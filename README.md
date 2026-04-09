@@ -91,6 +91,49 @@ docker compose logs -f sif-worker
 docker compose stop
 ```
 
+## 2.1 本地直接运行 `sif_login.py`
+
+如果你是在宿主机直接调试 `sif_login.py`，除了安装 `requirements.txt` 里的 Python 依赖，还需要安装 Playwright 的 Chromium 浏览器：
+
+```bash
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python sif_login.py --install-browser-only
+.venv/bin/python sif_login.py
+```
+
+如果浏览器尚未安装，脚本现在也会在启动时自动尝试执行：
+
+```bash
+.venv/bin/python -m playwright install chromium
+```
+
+## 2.2 Git 发布方式（子树同步）
+
+当前目录现在是独立 Git 仓库，但和上层 monorepo `AI-MCP` 的关系仍然是 subtree 工作流。也就是：
+
+- 拉取上游时，从 `AI-MCP/master` 的 `amz-sif-crawler/` 子树拆分后同步到本地
+- 发布改动时，把当前仓库内容同步回远端 `master` 的 `amz-sif-crawler/` 路径
+
+拉取上游更新：
+
+```bash
+git status --short
+env GIT_TERMINAL_PROMPT=0 scripts/pull_from_gkb_subtree.sh
+```
+
+发布本地改动：
+
+```bash
+git status --short
+git add -A
+git commit -m "feat: your change"
+
+# 用 subtree 脚本发布当前仓库
+env GIT_TERMINAL_PROMPT=0 scripts/sync_to_gkb_subtree.sh
+```
+
+这两个脚本会自动按 `amz-sif-crawler/` 这段 subtree 做 split / merge，避免把 monorepo 其他目录混进来。
+
 ## 3. 快速验证
 
 ### 3.1 通过网关发起聚合抓取

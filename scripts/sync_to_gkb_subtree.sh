@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Sync current standalone repo into gkb:master under amz-sif-crawler/
+# Sync the current project directory into gkb:master under amz-sif-crawler/
 # Usage:
 #   scripts/sync_to_gkb_subtree.sh
 #   GKB_REMOTE_URL=http://... scripts/sync_to_gkb_subtree.sh
@@ -11,24 +11,46 @@ TARGET_BRANCH="master"
 SOURCE_BRANCH="${SOURCE_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 GKB_REMOTE_URL="${GKB_REMOTE_URL:-http://gitlab.geekbuy.cn:8081/AceLink/AI-MCP.git}"
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
+CALL_DIR="$(pwd -P)"
+REPO_ROOT="$(git -C "$CALL_DIR" rev-parse --show-toplevel)"
+SOURCE_PREFIX_RAW="${SOURCE_PREFIX:-$(git -C "$CALL_DIR" rev-parse --show-prefix)}"
+SOURCE_PREFIX="${SOURCE_PREFIX_RAW%/}"
 WORK_DIR="$(mktemp -d)"
+SPLIT_BRANCH="codex/subtree-sync-${PREFIX_DIR}-$$"
 cleanup() {
+  if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$SPLIT_BRANCH"; then
+    git -C "$REPO_ROOT" branch -D "$SPLIT_BRANCH" >/dev/null
+  fi
   rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
 
 echo "[1/5] Validating local repository..."
 git -C "$REPO_ROOT" rev-parse --verify "$SOURCE_BRANCH" >/dev/null
+if [ -z "$SOURCE_PREFIX" ]; then
+  echo "ERROR: Current directory is the repository root."
+  echo "Run this script inside the project subdirectory, or set SOURCE_PREFIX explicitly."
+  exit 1
+fi
 
-echo "[2/5] Cloning remote repository..."
+echo "      repo root     : $REPO_ROOT"
+echo "      source branch : $SOURCE_BRANCH"
+echo "      source prefix : $SOURCE_PREFIX"
+echo "      target prefix : $PREFIX_DIR"
+
+echo "[2/6] Creating split branch from $SOURCE_PREFIX/..."
+# Ignore historical subtree join metadata from the monorepo so split can be
+# recomputed from the current tree shape even when older split hashes are gone.
+git -C "$REPO_ROOT" subtree split --ignore-joins --prefix "$SOURCE_PREFIX" -b "$SPLIT_BRANCH" "$SOURCE_BRANCH" >/dev/null
+
+echo "[3/6] Cloning remote repository..."
 git clone --branch "$TARGET_BRANCH" --single-branch "$GKB_REMOTE_URL" "$WORK_DIR/remote"
 
-echo "[3/5] Linking local repo as source remote..."
+echo "[4/6] Linking local repo as source remote..."
 git -C "$WORK_DIR/remote" remote add local-src "$REPO_ROOT"
-git -C "$WORK_DIR/remote" fetch local-src "$SOURCE_BRANCH"
+git -C "$WORK_DIR/remote" fetch local-src "$SPLIT_BRANCH"
 
-echo "[4/5] Syncing subtree into $PREFIX_DIR/..."
+echo "[5/6] Syncing subtree into $PREFIX_DIR/..."
 HAS_DIR=0
 HAS_SUBTREE_HISTORY=0
 if git -C "$WORK_DIR/remote" ls-tree -d --name-only HEAD "$PREFIX_DIR" | grep -qx "$PREFIX_DIR"; then
@@ -39,17 +61,17 @@ if git -C "$WORK_DIR/remote" log --grep="git-subtree-dir: $PREFIX_DIR" --oneline
 fi
 
 if [ "$HAS_SUBTREE_HISTORY" -eq 1 ]; then
-  git -C "$WORK_DIR/remote" subtree pull --prefix "$PREFIX_DIR" local-src "$SOURCE_BRANCH" --squash -m "sync($PREFIX_DIR): from local $SOURCE_BRANCH"
+  git -C "$WORK_DIR/remote" subtree pull --prefix "$PREFIX_DIR" local-src "$SPLIT_BRANCH" --squash -m "sync($PREFIX_DIR): from ${SOURCE_PREFIX}@${SOURCE_BRANCH}"
 else
   if [ "$HAS_DIR" -eq 1 ]; then
     # Existing folder is not managed by git subtree yet; convert it once.
     git -C "$WORK_DIR/remote" rm -r "$PREFIX_DIR"
     git -C "$WORK_DIR/remote" commit -m "chore($PREFIX_DIR): prepare subtree migration"
   fi
-  git -C "$WORK_DIR/remote" subtree add --prefix "$PREFIX_DIR" local-src "$SOURCE_BRANCH" --squash -m "init($PREFIX_DIR): import from local $SOURCE_BRANCH"
+  git -C "$WORK_DIR/remote" subtree add --prefix "$PREFIX_DIR" local-src "$SPLIT_BRANCH" --squash -m "init($PREFIX_DIR): import from ${SOURCE_PREFIX}@${SOURCE_BRANCH}"
 fi
 
-echo "[5/5] Pushing to gkb $TARGET_BRANCH..."
+echo "[6/6] Pushing to gkb $TARGET_BRANCH..."
 git -C "$WORK_DIR/remote" push origin "$TARGET_BRANCH"
 
-echo "Done. Local repo remains standalone; remote updated under $PREFIX_DIR/."
+echo "Done. Local repo remains in-place under $SOURCE_PREFIX/; remote updated under $PREFIX_DIR/."

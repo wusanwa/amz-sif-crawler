@@ -1,17 +1,18 @@
 ---
 name: gkb-subtree-sync
-description: Sync current standalone repository into GKB monorepo subtree safely. Use when pushing local changes under amz-sif-crawler/ to gkb master via scripts/sync_to_gkb_subtree.sh, especially after multi-file local changes, non-fast-forward confusion, or HTTP 413 oversized push failures.
+description: Sync current project directory into GKB monorepo subtree safely. Use when pushing local changes under amz-sif-crawler/ to gkb master via scripts/sync_to_gkb_subtree.sh, especially after multi-file local changes, non-fast-forward confusion, or HTTP 413 oversized push failures.
 ---
 
 # GKB Subtree Sync
 
-Follow this runbook to publish current repo changes into `gkb/master` as subtree path `amz-sif-crawler/`.
+Follow this runbook to publish current project directory changes into `gkb/master` as subtree path `amz-sif-crawler/`.
 
 ## Enforce Safety Rules
 
 - Commit local changes before subtree sync.
 - Never use direct `git push gkb main:master` for this workflow.
 - Use `scripts/sync_to_gkb_subtree.sh` as the source of truth.
+- Run the script from the project directory you want to publish so it can split the correct subtree prefix.
 
 ## Execute Standard Flow
 
@@ -25,7 +26,7 @@ Follow this runbook to publish current repo changes into `gkb/master` as subtree
    - `env GIT_TERMINAL_PROMPT=0 scripts/sync_to_gkb_subtree.sh`
 6. Verify success from output:
    - Expect `To ... master -> master`
-   - Expect final line: `Done. Local repo remains standalone; remote updated under amz-sif-crawler/.`
+   - Expect final line: `Done. Local repo remains in-place under amz-sif-crawler/; remote updated under amz-sif-crawler/.`
 
 ## Handle Known Failures
 
