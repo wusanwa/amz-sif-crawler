@@ -11,6 +11,7 @@ import faulthandler
 import diskcache
 import tempfile
 import shutil
+from collections import Counter
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from urllib.parse import urlparse
@@ -103,7 +104,7 @@ class AmazonData(BaseModel):
     product_title: str = Field(..., description="商品标题")
     main_price: Optional[str] = Field(None, description="主商品价格")
     model_number: Optional[str] = Field(None, description="型号，优先从商品标题的第一段提取")
-    variants: Optional[List[ProductVariant]] = Field(None, description="前3个核心变体列表")
+    variants: Optional[List[ProductVariant]] = Field(None, description="页面展示的变体列表")
     parent_item_count: int = Field(0, description="变体总数量")
 
 class SifRanking(BaseModel):
@@ -270,10 +271,42 @@ def _coerce_int(value: Any) -> int:
 
 
 def _extract_amazon_parent_item_count(raw_html: str = "", markdown_text: str = "") -> int:
-    candidates: List[int] = []
+    structural_candidates: List[int] = []
     html_text = raw_html or ""
-    md_text = markdown_text or ""
-    merged_text = f"{html_text}\n{md_text}"
+
+    def _count_option_lis(block: str) -> int:
+        li_tags = re.findall(r'<li\b[^>]*>', block, flags=re.IGNORECASE)
+        direct_option_count = 0
+        seen_keys = set()
+
+        for li_tag in li_tags:
+            if re.search(r'(?i)\baok-hidden\b', li_tag):
+                continue
+
+            attrs = []
+            for attr in [
+                "data-asin",
+                "data-defaultasin",
+                "data-csa-c-item-id",
+                "data-value",
+                "data-dp-url",
+                "title",
+                "aria-label",
+            ]:
+                m = re.search(rf'{attr}=["\']([^"\']+)["\']', li_tag, flags=re.IGNORECASE)
+                if m and m.group(1).strip():
+                    attrs.append(f"{attr}:{m.group(1).strip()}")
+
+            if not attrs:
+                continue
+
+            option_key = "|".join(attrs)
+            if option_key in seen_keys:
+                continue
+            seen_keys.add(option_key)
+            direct_option_count += 1
+
+        return direct_option_count
 
     # 1) 直接读取常见字段
     for pattern in [
@@ -284,7 +317,7 @@ def _extract_amazon_parent_item_count(raw_html: str = "", markdown_text: str = "
         r'"variationCount"\s*:\s*(\d+)',
     ]:
         for m in re.finditer(pattern, html_text, flags=re.IGNORECASE):
-            candidates.append(int(m.group(1)))
+            structural_candidates.append(int(m.group(1)))
 
     # 2) Amazon 常见脚本字段：dimensionValuesDisplayData 的 key 数量
     m_dim = re.search(
@@ -296,33 +329,132 @@ def _extract_amazon_parent_item_count(raw_html: str = "", markdown_text: str = "
         try:
             dim_map = json.loads(m_dim.group(1))
             if isinstance(dim_map, dict):
-                candidates.append(len(dim_map))
+                structural_candidates.append(len(dim_map))
         except Exception:
             pass
 
-    # 3) 页面上显式文案，如 "9 options" / "9 variants"
-    for m in re.finditer(r"\b(\d{1,3})\s+(?:options?|variants?)\b", merged_text, flags=re.IGNORECASE):
-        candidates.append(int(m.group(1)))
+    # 3) 优先按完整的 twister/variation 列表容器统计，避免被内部嵌套 div 提前截断。
+    option_list_blocks = re.findall(
+        r'<ul\b[^>]*class=["\'][^"\']*(?:dimension-values-list|a-button-toggle-group)[^"\']*["\'][^>]*>.*?</ul>',
+        html_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for block in option_list_blocks:
+        direct_option_count = _count_option_lis(block)
+        if direct_option_count > 0:
+            structural_candidates.append(direct_option_count)
 
-    # 4) 仅在 variation 区块中统计可选项数量，避免把推荐位误计入
+    # 4) 再兼容旧版 variation/twister 容器。
     variation_blocks = re.findall(
-        r'<[^>]+id=["\']variation_[^"\']+["\'][^>]*>.*?</(?:ul|div)>',
+        r'<(?:div|ul)\b[^>]+id=["\'](?:variation_[^"\']+|tp-inline-twister-[^"\']+|inline-twister-[^"\']+)["\'][^>]*>.*?</(?:div|ul)>',
         html_text,
         flags=re.IGNORECASE | re.DOTALL,
     )
     for block in variation_blocks:
-        option_count = len(
-            re.findall(
-                r'<li[^>]+(?:data-defaultasin|data-csa-c-item-id|data-value)=',
-                block,
-                flags=re.IGNORECASE,
-            )
-        )
-        if option_count > 0:
-            candidates.append(option_count)
+        direct_option_count = _count_option_lis(block)
+        if direct_option_count > 0:
+            structural_candidates.append(direct_option_count)
 
-    valid = [x for x in candidates if x > 0]
-    return max(valid) if valid else 0
+    # 5) 最后兜底：直接统计页面中所有 inline twister 的真实选项 li。
+    global_twister_lis = re.findall(
+        r'<li\b[^>]*data-asin=["\'][^"\']+["\'][^>]*class=["\'][^"\']*(?:inline-twister-swatch|dimension-value-list-item)[^"\']*["\'][^>]*>',
+        html_text,
+        flags=re.IGNORECASE,
+    )
+    if global_twister_lis:
+        structural_candidates.append(_count_option_lis("".join(global_twister_lis)))
+
+    valid = [x for x in structural_candidates if x > 0]
+    if not valid:
+        return 0
+
+    counter = Counter(valid)
+    most_common_count, most_common_freq = counter.most_common(1)[0]
+    if most_common_freq >= 2:
+        return most_common_count
+
+    valid.sort()
+    return valid[len(valid) // 2]
+
+
+def _extract_amazon_variants(raw_html: str = "") -> List[Dict[str, Any]]:
+    html_text = raw_html or ""
+    if not html_text:
+        return []
+
+    list_blocks = re.findall(
+        r'<ul\b[^>]*class=["\'][^"\']*(?:dimension-values-list|a-button-toggle-group)[^"\']*["\'][^>]*>.*?</ul>',
+        html_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    li_blocks: List[str] = []
+    for block in list_blocks:
+        li_blocks.extend(re.findall(r'<li\b[^>]*data-asin=["\'][^"\']+["\'][^>]*>.*?</li>', block, flags=re.IGNORECASE | re.DOTALL))
+
+    if not li_blocks:
+        li_blocks = re.findall(
+            r'<li\b[^>]*data-asin=["\'][^"\']+["\'][^>]*class=["\'][^"\']*(?:inline-twister-swatch|dimension-value-list-item)[^"\']*["\'][^>]*>.*?</li>',
+            html_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+    variants: List[Dict[str, Any]] = []
+    seen_asins = set()
+
+    for li_block in li_blocks:
+        asin_match = re.search(r'data-asin=["\']([^"\']+)["\']', li_block, flags=re.IGNORECASE)
+        asin = (asin_match.group(1).strip() if asin_match else "")
+        if not asin or asin in seen_asins:
+            continue
+        seen_asins.add(asin)
+
+        name = ""
+        img_match = re.search(r'<img[^>]+alt=["\']([^"\']+)["\']', li_block, flags=re.IGNORECASE)
+        if img_match:
+            name = html.unescape(img_match.group(1)).strip()
+        if not name:
+            label_match = re.search(r'aria-label=["\']([^"\']+)["\']', li_block, flags=re.IGNORECASE)
+            if label_match:
+                name = html.unescape(label_match.group(1)).strip()
+        if not name:
+            title_match = re.search(r'title=["\']([^"\']+)["\']', li_block, flags=re.IGNORECASE)
+            if title_match:
+                name = html.unescape(title_match.group(1)).strip()
+        if not name:
+            name = asin
+
+        price = None
+        price_patterns = [
+            r'class=["\'][^"\']*apex-pricetopay-value[^"\']*["\'][^>]*>.*?<span aria-hidden=["\']true["\']>(.*?)</span>',
+            r'class=["\'][^"\']*twister_swatch_price[^"\']*["\'][^>]*>.*?<span class=["\'][^"\']*olpWrapper[^"\']*["\']>(.*?)</span>',
+            r'<span aria-hidden=["\']true["\']>\s*([^<]*?(?:[$€£]|JPY|USD)[^<]*)</span>',
+        ]
+        for pattern in price_patterns:
+            m = re.search(pattern, li_block, flags=re.IGNORECASE | re.DOTALL)
+            if not m:
+                continue
+            candidate = re.sub(r'<[^>]+>', ' ', m.group(1))
+            candidate = re.sub(r'\s+', ' ', html.unescape(candidate)).strip()
+            if candidate:
+                price = candidate
+                break
+
+        unavailable = bool(
+            re.search(r'data-initiallyunavailable=["\']true["\']', li_block, flags=re.IGNORECASE)
+            or re.search(r'\ba-button-unavailable\b', li_block, flags=re.IGNORECASE)
+            or re.search(r'\bdefault-slot-unavailable\b', li_block, flags=re.IGNORECASE)
+        )
+
+        variants.append(
+            {
+                "variant_name": name,
+                "price": price,
+                "is_available": not unavailable,
+            }
+        )
+
+    return variants
 
 
 def _normalize_amazon_data(data: dict, raw_html: str = "", markdown_text: str = "") -> dict:
@@ -338,15 +470,29 @@ def _normalize_amazon_data(data: dict, raw_html: str = "", markdown_text: str = 
         "amazon_total_variants",
     ]
 
-    count = 0
+    alias_counts: List[int] = []
     for key in aliases:
         if key in data:
-            count = max(count, _coerce_int(data.get(key)))
+            coerced = _coerce_int(data.get(key))
+            if coerced > 0:
+                alias_counts.append(coerced)
 
-    if count <= 0:
-        count = _extract_amazon_parent_item_count(raw_html=raw_html, markdown_text=markdown_text)
+    structural_count = _extract_amazon_parent_item_count(raw_html=raw_html, markdown_text=markdown_text)
+    count = structural_count if structural_count > 0 else 0
 
+    if count <= 0 and alias_counts:
+        alias_counter = Counter(alias_counts)
+        count = alias_counter.most_common(1)[0][0]
+
+    parsed_variants = _extract_amazon_variants(raw_html=raw_html)
     variants = data.get("variants")
+    if not isinstance(variants, list):
+        variants = []
+
+    if parsed_variants and len(parsed_variants) >= len(variants):
+        data["variants"] = parsed_variants
+        variants = parsed_variants
+
     if isinstance(variants, list) and variants:
         count = max(count, len(variants))
 
@@ -373,9 +519,11 @@ def build_amazon_fallback_data(raw_html: str) -> dict:
         "product_title": title,
         "main_price": _extract_amazon_price(raw_html) or None,
         "model_number": model or None,
-        "variants": [],
+        "variants": _extract_amazon_variants(raw_html),
         "parent_item_count": _extract_amazon_parent_item_count(raw_html=raw_html),
     }
+    if data["variants"]:
+        data["parent_item_count"] = max(data["parent_item_count"], len(data["variants"]))
     return data
 
 
@@ -416,7 +564,7 @@ async def fetch_amazon_data_dom_fallback(url: str, asin: str, browser_cfg: Brows
         return {"data": {}, "error": "Amazon Timeout"}
 
     log_progress(asin, "✅ DOM 回退提取成功，避免空返回")
-    db_cache.set(f"amz_{asin}", data, expire=CACHE_EXPIRY_SEC)
+    cache_set(f"amz_{asin}", data, expire=CACHE_EXPIRY_SEC)
     return {"data": data, "error": None}
 
 
@@ -548,7 +696,7 @@ async def fetch_amazon_data_multilayer(
     
     amz_extract = LLMExtractionStrategy(
         llm_config=llm_cfg, schema=AmazonData.model_json_schema(),
-        instruction="提取商品名称 (product_title), 主价格 (main_price), 型号 (model_number), 变体列表 (variants: 只需前3个), 变体总数量 (parent_item_count)。注意：型号优先从标题第一个逗号前提取。范围在 #dp-container。"
+        instruction="提取商品名称 (product_title), 主价格 (main_price), 型号 (model_number), 变体列表 (variants: 页面展示的全部变体), 变体总数量 (parent_item_count)。注意：型号优先从标题第一个逗号前提取。范围在 #dp-container。"
     )
     
     try:
