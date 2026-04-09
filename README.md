@@ -132,7 +132,10 @@ git commit -m "feat: your change"
 env GIT_TERMINAL_PROMPT=0 scripts/sync_to_gkb_subtree.sh
 ```
 
-这两个脚本会自动按 `amz-sif-crawler/` 这段 subtree 做 split / merge，避免把 monorepo 其他目录混进来。
+这两个脚本会自动兼容两种形态：
+
+- 在 monorepo 子目录里运行时，按 `amz-sif-crawler/` 做 subtree split / merge
+- 在当前这种独立仓库里运行时，自动把仓库根目录内容同步到远端 `amz-sif-crawler/`
 
 ## 3. 快速验证
 

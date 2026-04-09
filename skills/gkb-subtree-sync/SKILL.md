@@ -12,7 +12,8 @@ Follow this runbook to publish current project directory changes into `gkb/maste
 - Commit local changes before subtree sync.
 - Never use direct `git push gkb main:master` for this workflow.
 - Use `scripts/sync_to_gkb_subtree.sh` as the source of truth.
-- Run the script from the project directory you want to publish so it can split the correct subtree prefix.
+- Run the script from the project directory you want to publish.
+- If the current repo is already a standalone repo for `amz-sif-crawler`, the script should auto-detect that mode and sync the repo root into the remote `amz-sif-crawler/` path.
 
 ## Execute Standard Flow
 
