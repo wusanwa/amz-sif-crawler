@@ -75,24 +75,11 @@ AMAZON_PROFILE = os.getenv("AMAZON_PROFILE_DIR", os.path.join(PROFILE_ROOT, "ama
 SIF_PROFILE = os.getenv("SIF_PROFILE_DIR", os.path.join(PROFILE_ROOT, "sif"))
 CACHE_DIR = os.getenv("CACHE_DIR", os.path.join(RUNTIME_ROOT, "cache_db"))
 CACHE_EXPIRY_SEC = SETTINGS.get("CACHE_EXPIRY_SEC", 80000)
-DISABLE_CACHE = os.getenv("DISABLE_CACHE", "").strip().lower() in {"1", "true", "yes", "on"}
 DEBUG_MODE = False # Default, will be updated in main_worker
 
 # 初始化高性能缓存
 os.makedirs(CACHE_DIR, exist_ok=True)
 db_cache = diskcache.Cache(CACHE_DIR)
-
-
-def cache_get(key: str):
-    if DISABLE_CACHE:
-        return None
-    return db_cache.get(key)
-
-
-def cache_set(key: str, value, expire: int):
-    if DISABLE_CACHE:
-        return
-    db_cache.set(key, value, expire=expire)
 
 # 数据模型
 class ProductVariant(BaseModel):
@@ -564,7 +551,7 @@ async def fetch_amazon_data_dom_fallback(url: str, asin: str, browser_cfg: Brows
         return {"data": {}, "error": "Amazon Timeout"}
 
     log_progress(asin, "✅ DOM 回退提取成功，避免空返回")
-    cache_set(f"amz_{asin}", data, expire=CACHE_EXPIRY_SEC)
+    db_cache.set(f"amz_{asin}", data, expire=CACHE_EXPIRY_SEC)
     return {"data": data, "error": None}
 
 
@@ -687,7 +674,7 @@ async def fetch_amazon_data_multilayer(
     url: str, asin: str, llm_cfg, browser_cfg: BrowserConfig, allow_profile_fallback: bool = True
 ) -> dict:
     if not DEBUG_MODE:
-        cached_data = cache_get(f"amz_{asin}")
+        cached_data = db_cache.get(f"amz_{asin}")
         if cached_data: 
             log_progress(asin, "🛒 Amazon 数据已存在缓存中，跳过抓取")
             return {"data": cached_data, "error": None}
@@ -776,11 +763,8 @@ async def fetch_amazon_data_multilayer(
                         elif len(segments) > 1:
                             data["model_number"] = segments[1].strip()
                 
-                if DISABLE_CACHE:
-                    log_progress(asin, "✅ Amazon 数据提取成功，已跳过缓存写入")
-                else:
-                    log_progress(asin, "✅ Amazon 数据提取成功，进入缓存")
-                cache_set(f"amz_{asin}", data, expire=CACHE_EXPIRY_SEC)
+                log_progress(asin, "✅ Amazon 数据提取成功，进入缓存")
+                db_cache.set(f"amz_{asin}", data, expire=CACHE_EXPIRY_SEC)
                 return {"data": data, "error": None}
             
             err = getattr(res, 'error_message', '提取失败或内容为空')
@@ -817,7 +801,7 @@ async def fetch_amazon_data_multilayer(
 
 async def fetch_sif_data_multilayer(asin: str, llm_cfg, browser_cfg: BrowserConfig) -> dict:
     if not DEBUG_MODE:
-        cached_rankings = cache_get(f"sif_{asin}")
+        cached_rankings = db_cache.get(f"sif_{asin}")
         if cached_rankings: 
             log_progress(asin, "🔍 SIF 数据已存在缓存中，跳过抓取")
             return {"data": cached_rankings, "error": None}
@@ -918,11 +902,8 @@ async def fetch_sif_data_multilayer(asin: str, llm_cfg, browser_cfg: BrowserConf
                 if isinstance(data, list) and len(data) > 0: data = data[0]
                 if isinstance(data, dict) and data.get("top_rankings"):
                     rankings = data["top_rankings"][:3]
-                    if DISABLE_CACHE:
-                        log_progress(asin, "✅ SIF 数据提取成功，已跳过缓存写入")
-                    else:
-                        log_progress(asin, "✅ SIF 数据提取成功，进入缓存")
-                    cache_set(f"sif_{asin}", rankings, expire=CACHE_EXPIRY_SEC)
+                    log_progress(asin, "✅ SIF 数据提取成功，进入缓存")
+                    db_cache.set(f"sif_{asin}", rankings, expire=CACHE_EXPIRY_SEC)
                     return {"data": rankings, "error": None}
             
             # 页面已加载但没有排名，优先提示登录失效，避免误导为普通空数据
