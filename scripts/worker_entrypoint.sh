@@ -12,7 +12,6 @@ INSTANCE_ROOT="${RUNTIME_ROOT}/${INSTANCE_ID}"
 AMZ_SEED="${SEED_ROOT}/amazon"
 SIF_SEED="${SEED_ROOT}/sif"
 AMZ_ARCHIVE="${ARCHIVE_ROOT}/amazon.tar.gz"
-SIF_ARCHIVE="${ARCHIVE_ROOT}/sif.tar.gz"
 AMZ_RUNTIME="${INSTANCE_ROOT}/amazon"
 SIF_RUNTIME="${INSTANCE_ROOT}/sif"
 
@@ -57,12 +56,14 @@ case "$NODE_TYPE" in
     export AMAZON_PROFILE_DIR="$AMZ_RUNTIME"
     ;;
   sif)
-    copy_or_unpack_profile "sif" "$SIF_SEED" "$SIF_ARCHIVE" "$SIF_RUNTIME"
+    mkdir -p "$SIF_RUNTIME"
+    echo "[entrypoint] using direct SIF runtime profile dir: $SIF_RUNTIME"
     export SIF_PROFILE_DIR="$SIF_RUNTIME"
     ;;
   *)
     copy_or_unpack_profile "amazon" "$AMZ_SEED" "$AMZ_ARCHIVE" "$AMZ_RUNTIME"
-    copy_or_unpack_profile "sif" "$SIF_SEED" "$SIF_ARCHIVE" "$SIF_RUNTIME"
+    mkdir -p "$SIF_RUNTIME"
+    echo "[entrypoint] using direct SIF runtime profile dir: $SIF_RUNTIME"
     export AMAZON_PROFILE_DIR="$AMZ_RUNTIME"
     export SIF_PROFILE_DIR="$SIF_RUNTIME"
     ;;

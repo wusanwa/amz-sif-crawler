@@ -167,6 +167,137 @@ curl -X POST http://localhost:8888/crawl \
 - 入口文件：[mcp_server.py](mcp_server.py)
 - 说明：在单 worker 容器内按 `NODE_TYPE` 执行（amazon 或 sif）
 
+## 4.1 通用 Browser Daemon（Amazon + SIF 抓包）
+
+新增了一个独立的通用 daemon，用来参考 `lingxing-ads-automation/src/daemon` 的思路，把 Amazon 和 SIF 的浏览器常驻、状态管理与 HTTP 查询统一起来。
+
+入口：
+
+- [daemon_server.py](daemon_server.py)
+- [daemon/browser_daemon.py](daemon/browser_daemon.py)
+- [daemon/http_api.py](daemon/http_api.py)
+
+用途：
+
+- 维持 Amazon / SIF 持久化浏览器 profile
+- 统一 warmup 浏览器实例
+- 统一打开目标页并直接通过 HTTP 返回结果
+
+启动：
+
+```bash
+python daemon_server.py
+```
+
+默认端口：
+
+- `http://localhost:8890`
+
+示例：
+
+```bash
+curl http://localhost:8890/health
+
+curl -X POST http://localhost:8890/daemon/warmup \
+  -H 'Content-Type: application/json' \
+  -d '{"provider":"sif"}'
+
+curl -X POST http://localhost:8890/daemon/capture \
+  -H 'Content-Type: application/json' \
+  -d '{"provider":"amazon","url":"https://www.amazon.com/dp/B0CDX5XGLK","idle_ms":5000}'
+```
+
+当前这个 daemon 是第一版基础设施，先独立于现有 `crawler_worker.py` 工作。这样可以先稳定做“通用抓包”，后续再逐步把现有 Amazon/SIF 抓取逻辑改成走 daemon，而不是每次请求都重新起浏览器。
+
+### SIF 任务接入 daemon
+
+现在 `sif_query.py` 已经支持优先复用 daemon 里的常驻 `sif` 浏览器。
+
+启用方式：
+
+```bash
+export SIF_DAEMON_URL=http://127.0.0.1:8891
+```
+
+可选参数：
+
+```bash
+export SIF_DAEMON_IDLE_MS=2500
+```
+
+启用后，现有 `crawler_worker.py` 在执行 SIF 任务时会：
+
+- 先调用 daemon 的 `/daemon/warmup`
+- 再调用 `/daemon/sif/query`
+- 如果 daemon 没拿到有效结果，再自动回退到原来的本地浏览器抓取逻辑
+
+这意味着你可以渐进迁移，不需要一次性改掉现有 worker 全部逻辑。
+
+### 常驻浏览器与选项卡复用
+
+如果设置了：
+
+```bash
+export SIF_DAEMON_URL=http://127.0.0.1:8891
+```
+
+当前行为就是：
+
+- `sif` 浏览器由 daemon 常驻维护
+- `crawler_worker.py` 不会在任务结束后销毁这个浏览器
+- daemon 会优先复用同一个 `page/tab`
+- 下一个 SIF 任务会继续使用这个已存在的页面上下文
+
+也就是说，这已经是“浏览器不销毁、选项卡复用”的实现方式。
+
+推荐调用顺序：
+
+```bash
+# 终端 1：启动 daemon
+env DAEMON_PORT=8891 .venv/bin/python daemon_server.py
+
+# 终端 2：预热常驻 sif 浏览器
+curl -X POST http://127.0.0.1:8891/daemon/warmup \
+  -H 'Content-Type: application/json' \
+  -d '{"provider":"sif"}'
+
+# 终端 2：后续所有 sif 任务都复用 daemon 浏览器
+export SIF_DAEMON_URL=http://127.0.0.1:8891
+```
+
+### SIF 多 Tab 并发复用
+
+当前 `sif` daemon 已支持 tab 池模式：
+
+- 单个 `sif` 浏览器常驻
+- 默认最多复用 `5` 个 tab
+- 最多支持 `5` 个 SIF 任务同时执行
+- 超出的请求会等待空闲 tab，而不是再起新浏览器
+
+你可以通过状态接口观察 tab 池：
+
+```bash
+curl http://127.0.0.1:8891/daemon/status
+```
+
+会返回：
+
+- `max_tabs`
+- `tabs[*].slot_id`
+- `tabs[*].busy`
+- `tabs[*].current_url`
+- `tabs[*].last_used_at`
+
+并发调用时，继续复用同一个接口即可：
+
+```bash
+curl -X POST http://127.0.0.1:8891/daemon/sif/query \
+  -H 'Content-Type: application/json' \
+  -d '{"asin":"B0CDX5XGLK","idle_ms":2500}'
+```
+
+如果你同时发起最多 5 个不同 ASIN 请求，daemon 会自动分配到 5 个复用 tab 上执行。
+
 ## 5. 目录说明（当前）
 
 - [docker-compose.yml](docker-compose.yml)：三服务编排

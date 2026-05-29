@@ -5,7 +5,6 @@ import json
 import re
 import html
 import logging
-import subprocess
 import time
 import faulthandler
 import diskcache
@@ -55,6 +54,9 @@ except ImportError as e:
     sys.stderr.write(f"缺少依赖库: {e}\n")
     sys.exit(1)
 
+from sif_query import fetch_sif_data_multilayer
+from sif_runtime import build_sif_browser_config
+
 # ===== 环境探测与基础路径 =====
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config", "settings.json")
@@ -93,15 +95,6 @@ class AmazonData(BaseModel):
     model_number: Optional[str] = Field(None, description="型号，优先从商品标题的第一段提取")
     variants: Optional[List[ProductVariant]] = Field(None, description="页面展示的变体列表")
     parent_item_count: int = Field(0, description="变体总数量")
-
-class SifRanking(BaseModel):
-    keyword: str = Field(..., description="关键词名称")
-    organic_rank: str = Field(..., description="自然排名，格式如 P1-1")
-    ad_rank: str = Field(..., description="广告排名，格式如 P1-1/SP，无广告填 -")
-
-class SifData(BaseModel):
-    asin: str = Field(..., description="ASIN")
-    top_rankings: List[SifRanking] = Field(..., description="排名列表")
 
 # ===== 系统锁 (防止多进程竞争浏览器 Profile) =====
 class CrawlerLock:
@@ -170,11 +163,26 @@ def safe_get(data, key, default=""):
     return val if val is not None else default
 
 
+def env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+KEEP_SIF_BROWSER_OPEN = env_flag("KEEP_SIF_BROWSER_OPEN", False)
+USE_SIF_DAEMON = bool(str(os.getenv("SIF_DAEMON_URL", "") or "").strip())
+
+
 def _extract_asin(candidate: str) -> Optional[str]:
     if not candidate:
         return None
     match = re.search(r"\b(B[A-Z0-9]{9})\b", candidate.upper())
     return match.group(1) if match else None
+
+
+def should_cleanup_sif_browser() -> bool:
+    return not KEEP_SIF_BROWSER_OPEN and not USE_SIF_DAEMON
 
 
 def _build_canonical_amazon_url(asin: str) -> str:
@@ -555,119 +563,6 @@ async def fetch_amazon_data_dom_fallback(url: str, asin: str, browser_cfg: Brows
     return {"data": data, "error": None}
 
 
-def detect_sif_auth_state(url: str = "", text: str = "", status_code: Optional[int] = None) -> str:
-    """
-    识别 SIF 页面状态：
-    - login_required: 登录失效/需要重新登录
-    - challenge: 验证码/风控拦截
-    - ok: 未发现明显异常
-    """
-    u = (url or "").lower()
-    t = (text or "").lower()
-
-    # 明确的未登录/被踢线信号（避免用“登录”这种弱词造成误判）
-    hard_login_signals = [
-        "session expired",
-        "unauthorized",
-        "请先登录",
-        "在别的浏览器登录",
-        "账号异常登录提醒",
-        "为了保证您的账号安全，我们已将您的账号从本浏览器退出",
-        "我知道了重新登录",
-        "手机号",
-        "手机号码",
-        "密码",
-    ]
-    # 常见已登录页面特征（出现时优先判定为 ok）
-    logged_in_markers = [
-        "查销量",
-        "反查流量",
-        "广告透视仪",
-        "流量时光机",
-        "会员购买",
-        "到期",
-    ]
-    challenge_signals = [
-        "captcha", "robot", "verify", "verification",
-        "验证码", "人机验证", "安全验证",
-    ]
-
-    if status_code in (401, 403):
-        return "login_required"
-    if "/login" in u or "/signin" in u:
-        return "login_required"
-    if any(k in t for k in challenge_signals):
-        return "challenge"
-    # 页面出现明显业务菜单时，优先视为已登录，避免因页面中包含“登录”字样误判
-    if any(k in t for k in logged_in_markers):
-        return "ok"
-    if any(k in t for k in hard_login_signals):
-        return "login_required"
-    return "ok"
-
-
-def try_refresh_sif_profile(asin: str) -> dict:
-    """触发外部登录脚本修补 SIF Profile。"""
-    log_progress(asin, "❌ SIF 登录已失效或需要登录，准备进入自动登录流程...")
-    try:
-        login_script = os.path.join(BASE_DIR, "sif_login.py")
-        log_progress(asin, "🔑 运行 sif_login.py 修补 Profile...")
-        login_proc = subprocess.run([sys.executable, login_script], capture_output=True, text=True)
-        if login_proc.returncode == 0:
-            log_progress(asin, "✅ SIF 自动登录修补成功！")
-            return {"data": [], "error": "SIF Session Refreshed, please retry"}
-        log_progress(asin, f"❌ SIF 自动登录失败: {login_proc.stderr}")
-        return {"data": [], "error": "SIF Login Failed"}
-    except Exception as e:
-        log_progress(asin, f"❌ 自动登录尝试异常: {str(e)}")
-        return {"data": [], "error": f"SIF Login Exception: {str(e)}"}
-
-
-async def probe_sif_session_after_timeout(sif_url: str, asin: str, browser_cfg: BrowserConfig) -> str:
-    """
-    当主抓取超时时，做一次轻量探测来判断是否为登录失效或风控拦截。
-    返回: login_required | challenge | unknown
-    """
-    try:
-        async with AsyncWebCrawler(config=browser_cfg) as crawler:
-            probe = await asyncio.wait_for(
-                crawler.arun(
-                    url=sif_url,
-                    config=CrawlerRunConfig(
-                        cache_mode=CacheMode.BYPASS,
-                        css_selector="body",
-                        wait_for="css:body",
-                        wait_until="domcontentloaded",
-                        process_iframes=False,
-                        remove_overlay_elements=True,
-                        page_timeout=15000,
-                    ),
-                ),
-                timeout=25,
-            )
-
-            merged_text = " ".join(
-                filter(
-                    None,
-                    [
-                        getattr(probe, "error_message", ""),
-                        probe.markdown or "",
-                        probe.cleaned_html or "",
-                    ],
-                )
-            )
-            state = detect_sif_auth_state(
-                url=probe.url or sif_url,
-                text=merged_text,
-                status_code=probe.status_code,
-            )
-            log_progress(asin, f"🧪 超时后登录态探测结果: {state}")
-            if state in ("login_required", "challenge"):
-                return state
-    except Exception as e:
-        log_progress(asin, f"⚠️ 超时后探测失败: {str(e)}")
-    return "unknown"
-
 # ===== 抓取核心逻辑 (完全剥离，单实例进入) =====
 
 async def fetch_amazon_data_multilayer(
@@ -799,133 +694,6 @@ async def fetch_amazon_data_multilayer(
         log_progress(asin, f"💥 Amazon 抓取异常: {str(e)}")
         return {"data": {}, "error": str(e)}
 
-async def fetch_sif_data_multilayer(asin: str, llm_cfg, browser_cfg: BrowserConfig) -> dict:
-    if not DEBUG_MODE:
-        cached_rankings = db_cache.get(f"sif_{asin}")
-        if cached_rankings: 
-            log_progress(asin, "🔍 SIF 数据已存在缓存中，跳过抓取")
-            return {"data": cached_rankings, "error": None}
-
-    sif_url = f"https://www.sif.com/reverse?country=US&asin={asin}&isListingSearch=0"
-    log_progress(asin, "🔍 准备获取 SIF 数据...")
-    
-    sif_extract = LLMExtractionStrategy(
-        llm_config=llm_cfg, schema=SifData.model_json_schema(),
-        instruction="只在 .asin-keyword 标识的表格区域内，提取排在最前面的前 3 行关键词排名。Px-y 格式，广告位加 /SP。无排名填 -。"
-    )
-    
-    try:
-        log_progress(asin, "🔍 正在启动 SIF 浏览器实例...")
-        async with AsyncWebCrawler(config=browser_cfg) as crawler:
-            js_scroll = [
-                "const el = document.querySelector('.asin-keyword'); if(el) { el.scrollIntoView(); window.scrollBy(0, -100); }",
-                "(function() {"
-                "  const pruner = () => {"
-                "    const rows = document.querySelectorAll('.asin-keyword tr, .asin-keyword .keyword-row');"
-                "    if (rows.length > 10) {"
-                "      for (let i = 10; i < rows.length; i++) rows[i].remove();"
-                "    }"
-                "  };"
-                "  pruner();"
-                "})();",
-                "await new Promise(r => setTimeout(r, 3000));"
-            ]
-            log_progress(asin, "🔍 SIF 页面加载中 (arun)...")
-            res = await asyncio.wait_for(
-                crawler.arun(
-                    url=sif_url,
-                    config=CrawlerRunConfig(
-                        extraction_strategy=sif_extract, 
-                        markdown_generator=DefaultMarkdownGenerator(content_filter=None), 
-                        cache_mode=CacheMode.BYPASS, 
-                        # 先保证页面可用，避免站点改版/登录重定向导致严格选择器直接超时
-                        css_selector="body", 
-                        wait_for="css:body",
-                        wait_until="commit",
-                        excluded_tags=['script', 'style', 'path', 'svg', 'nav', 'footer', 'header', 'aside', 'iframe', 'canvas', 'noscript', 'form'],
-                        excluded_selector="#header, #footer, .navbar, .sidebar",
-                        js_code=js_scroll,
-                        process_iframes=False,
-                        remove_overlay_elements=True,
-                        page_timeout=40000
-                    )
-                ),
-                timeout=55
-            )
-            log_progress(asin, f"✨ SIF arun 返回成功: {res.success} | Status: {res.status_code}")
-
-            # 常见拦截判定：重定向到了登录页 或 出现了账号冲突/强制退出提示
-            merged_probe_text = " ".join(
-                filter(
-                    None,
-                    [
-                        getattr(res, "error_message", ""),
-                        res.markdown or "",
-                        res.cleaned_html or "",
-                    ],
-                )
-            )
-            auth_state = detect_sif_auth_state(
-                url=res.url or "",
-                text=merged_probe_text,
-                status_code=res.status_code,
-            )
-            redirect_to_login = auth_state == "login_required"
-            blocked_by_challenge = auth_state == "challenge"
-
-            final_url = (res.url or "").lower()
-            requested_reverse = "/reverse" in sif_url.lower()
-            landed_on_home = final_url.endswith("sif.com/") or final_url.endswith("sif.com")
-            left_reverse_page = requested_reverse and final_url and "/reverse" not in final_url
-            if auth_state == "ok" and (landed_on_home or left_reverse_page):
-                redirect_to_login = True
-
-            if redirect_to_login:
-                return try_refresh_sif_profile(asin)
-            if blocked_by_challenge:
-                log_progress(asin, "❌ SIF 页面触发验证码/风控拦截")
-                return {"data": [], "error": "SIF Challenge/CAPTCHA"}
-            
-            # --- SIF 快速失败判定 ---
-            if not res.success:
-                err = getattr(res, 'error_message', 'SIF 页面加载失败')
-                log_progress(asin, f"❌ SIF 加载失败: {err}")
-                return {"data": [], "error": err}
-                
-            if res.status_code and res.status_code >= 400:
-                log_progress(asin, f"❌ SIF HTTP 错误: {res.status_code}")
-                return {"data": [], "error": f"SIF HTTP {res.status_code}"}
-
-            if res.extracted_content:
-                log_progress(asin, "✨ AI 正在解析 SIF JSON 内容...")
-                data = json.loads(res.extracted_content)
-                if isinstance(data, list) and len(data) > 0: data = data[0]
-                if isinstance(data, dict) and data.get("top_rankings"):
-                    rankings = data["top_rankings"][:3]
-                    log_progress(asin, "✅ SIF 数据提取成功，进入缓存")
-                    db_cache.set(f"sif_{asin}", rankings, expire=CACHE_EXPIRY_SEC)
-                    return {"data": rankings, "error": None}
-            
-            # 页面已加载但没有排名，优先提示登录失效，避免误导为普通空数据
-            if "asin-keyword" not in (res.cleaned_html or "").lower():
-                return {"data": [], "error": "SIF Login Required"}
-
-            err = getattr(res, 'error_message', '') or '未找到 SIF 排名或内容为空'
-            log_progress(asin, f"❌ SIF 抓取失败: {err}")
-            return {"data": [], "error": err}
-    except asyncio.TimeoutError:
-        log_progress(asin, "⏰ SIF 抓取超时，开始登录态复核...")
-        timeout_state = await probe_sif_session_after_timeout(sif_url, asin, browser_cfg)
-        if timeout_state == "login_required":
-            return try_refresh_sif_profile(asin)
-        if timeout_state == "challenge":
-            return {"data": [], "error": "SIF Challenge/CAPTCHA (after timeout)"}
-        log_progress(asin, "⏰ SIF 抓取超时 (55s)")
-        return {"data": [], "error": "SIF Timeout"}
-    except Exception as e:
-        log_progress(asin, f"💥 SIF 抓取异常: {str(e)}")
-        return {"data": [], "error": str(e)}
-
 # ===== 主控制流 =====
 
 async def main_worker(manual_urls: Optional[List[str]] = None, debug_mode: Optional[bool] = None, skip_lock: bool = False, outfile: Optional[str] = None, task_type: str = "both"):
@@ -963,14 +731,24 @@ async def main_worker(manual_urls: Optional[List[str]] = None, debug_mode: Optio
         )
     
         common_args = ["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-setuid-sandbox"]
+        sif_args = common_args + ["--window-size=1600,1200"]
         user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        sif_user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 
         # 容器内通常没有 X server，必须无头；本地开发默认保留可视化。
         in_docker = os.getenv("DOCKER_ENV") == "1"
         amz_headless = True if in_docker else False
 
         amz_cfg = BrowserConfig(browser_type="chromium", headless=amz_headless, use_persistent_context=True, user_data_dir=AMAZON_PROFILE, extra_args=common_args, user_agent=user_agent)
-        sif_cfg = BrowserConfig(browser_type="chromium", headless=True, use_persistent_context=True, user_data_dir=SIF_PROFILE, extra_args=common_args, user_agent=user_agent)
+        sif_headless = True if in_docker else env_flag("SIF_HEADLESS", False)
+
+        sif_cfg = build_sif_browser_config(
+            profile_dir=SIF_PROFILE,
+            headless=sif_headless,
+            extra_args=sif_args,
+            user_agent=sif_user_agent,
+            viewport={"width": 1600, "height": 1200},
+        )
     
         # 确定待爬取列表 (仅支持从外部手动传入)
         urls = manual_urls or []
@@ -1044,9 +822,19 @@ async def main_worker(manual_urls: Optional[List[str]] = None, debug_mode: Optio
                 if task_type in ["both", "sif"]:
                     log_progress(asin, "➡️ 进入 SIF 阶段")
                     for attempt in range(3):
-                        force_kill_browsers()
-                        clean_lock(SIF_PROFILE)
-                        sif_res = await fetch_sif_data_multilayer(asin, llm_cfg, sif_cfg)
+                        if should_cleanup_sif_browser():
+                            force_kill_browsers()
+                            clean_lock(SIF_PROFILE)
+                        sif_res = await fetch_sif_data_multilayer(
+                            asin,
+                            llm_cfg,
+                            sif_cfg,
+                            db_cache=db_cache,
+                            cache_expiry_sec=CACHE_EXPIRY_SEC,
+                            debug_mode=DEBUG_MODE,
+                            log_progress=log_progress,
+                            base_dir=BASE_DIR,
+                        )
                         if not sif_res.get("error"): break
                         log_progress(asin, f"🔄 SIF 阶段失败，正在进行重试 [{attempt+1}/3]...")
                 
@@ -1090,7 +878,8 @@ async def main_worker(manual_urls: Optional[List[str]] = None, debug_mode: Optio
             except Exception as e:
                 sys.stderr.write(f"💥 循环内异常: {str(e)}\n")
             finally:
-                force_kill_browsers() # 每轮结束清理
+                if task_type in ["both", "sif"] and should_cleanup_sif_browser():
+                    force_kill_browsers() # 每轮结束清理
     except Exception as e:
         sys.stderr.write(f"💥 main_worker 异常: {str(e)}\n")
     finally:
@@ -1103,4 +892,5 @@ if __name__ == "__main__":
         asyncio.run(main_worker())
     finally:
         db_cache.close()
-        os.system("pkill -9 -f chrome 2>/dev/null")
+        if not USE_SIF_DAEMON:
+            os.system("pkill -9 -f chrome 2>/dev/null")
