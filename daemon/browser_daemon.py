@@ -11,6 +11,8 @@ from urllib.request import urlopen
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
+from amazon_js_fetcher import extract_amazon_product_from_page
+
 from .config import ensure_runtime_dirs
 from .providers import get_provider_settings, list_supported_providers, resolve_browser_executable
 
@@ -32,13 +34,13 @@ class BrowserProviderDaemon:
         self._lock = asyncio.Lock()
         self._page_marker = f"daemon:{provider}"
         self._launched_process: subprocess.Popen[str] | None = None
-        self._max_tabs = 5 if provider == "sif" else 1
+        self._max_tabs = 5 if provider == "sif" else 2
         self._tab_pool: list[dict[str, Any]] = []
 
     def status(self) -> dict[str, Any]:
         return {
             "provider": self.provider,
-            "running": self.context is not None,
+            "running": self._context_alive(),
             "started_at": self.started_at,
             "last_error": self.last_error,
             "profile_dir": str(self.settings.profile_dir),
@@ -74,28 +76,28 @@ class BrowserProviderDaemon:
         except Exception:
             return False
 
-    async def _stop_browser(self) -> None:
-        if self.page is not None:
-            with suppress(Exception):
-                await self.page.close()
+    async def _reset_connection_state(self) -> None:
         self.page = None
-        if self.browser is not None:
-            with suppress(Exception):
-                await self.browser.close()
-        self.browser = None
         if self.context is not None:
             with suppress(Exception):
                 await self.context.close()
         self.context = None
+        if self.browser is not None:
+            with suppress(Exception):
+                await self.browser.close()
+        self.browser = None
         if self.playwright is not None:
             with suppress(Exception):
                 await self.playwright.stop()
         self.playwright = None
+        self._tab_pool = []
+
+    async def _stop_browser(self) -> None:
+        await self._reset_connection_state()
         if self._launched_process is not None:
             with suppress(Exception):
                 self._launched_process.terminate()
             self._launched_process = None
-        self._tab_pool = []
 
     def _cdp_http_url(self) -> str:
         return f"http://{self.settings.cdp_host}:{self.settings.cdp_port}"
@@ -123,18 +125,29 @@ class BrowserProviderDaemon:
     async def _connect_over_cdp(self) -> bool:
         if not self._cdp_browser_available():
             return False
-        if self.playwright is None:
-            self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.connect_over_cdp(self._cdp_http_url())
-        contexts = list(self.browser.contexts)
-        self.context = contexts[0] if contexts else None
-        if self.context is None:
-            raise RuntimeError(f"CDP browser at {self._cdp_http_url()} has no persistent context")
-        self.page = None
-        await self._ensure_daemon_page()
-        self.started_at = _now_iso()
-        self.last_error = ""
-        return True
+        last_error: Exception | None = None
+        for _ in range(5):
+            try:
+                await self._reset_connection_state()
+                if self.playwright is None:
+                    self.playwright = await async_playwright().start()
+                self.browser = await self.playwright.chromium.connect_over_cdp(self._cdp_http_url())
+                contexts = list(self.browser.contexts)
+                self.context = contexts[0] if contexts else None
+                if self.context is None:
+                    raise RuntimeError(f"CDP browser at {self._cdp_http_url()} has no persistent context")
+                self.page = None
+                await self._ensure_daemon_page()
+                self.started_at = _now_iso()
+                self.last_error = ""
+                return True
+            except Exception as exc:
+                last_error = exc
+                await asyncio.sleep(0.5)
+
+        if last_error is not None:
+            raise last_error
+        return False
 
     def _launch_cdp_browser_process(self, browser_path: str) -> subprocess.Popen[str]:
         self.settings.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -336,6 +349,8 @@ class BrowserProviderDaemon:
         browser_path = resolve_browser_executable(self.provider)
         if not browser_path:
             raise RuntimeError(f"No browser executable found for provider={self.provider}")
+
+        await self._stop_browser()
 
         if self.settings.prefer_cdp_attach:
             if await self._connect_over_cdp():
@@ -539,6 +554,49 @@ class BrowserProviderDaemon:
                 "state": str((rankings or {}).get("state", "unknown") or "unknown"),
                 "rankings": (rankings or {}).get("rankings", []) if isinstance(rankings, dict) else [],
                 "captured_at": _now_iso(),
+            }
+            return result
+        except Exception as exc:
+            self.last_error = str(exc)
+            raise
+        finally:
+            await self._release_slot(slot, current_url=page.url if not page.is_closed() else "")
+
+    async def fetch_amazon_product(
+        self,
+        *,
+        url: str,
+        wait_until: str = "domcontentloaded",
+        idle_ms: int = 1500,
+    ) -> dict[str, Any]:
+        if self.provider != "amazon":
+            raise RuntimeError("fetch_amazon_product is only supported for provider=amazon")
+
+        slot = await self._acquire_slot()
+        page = slot["page"]
+
+        try:
+            response = await page.goto(url, wait_until=wait_until, timeout=60000)
+            await page.wait_for_timeout(max(idle_ms, 0))
+            await self._mark_slot_page(page, str(slot["slot_id"]))
+
+            for _ in range(20):
+                extracted = await extract_amazon_product_from_page(page)
+                if not extracted.get("error") or extracted.get("error") != "Invalid Product Page: No Title Found":
+                    break
+                await page.wait_for_timeout(500)
+
+            extracted = await extract_amazon_product_from_page(page)
+            result = {
+                "provider": self.provider,
+                "url": url,
+                "current_url": page.url,
+                "title": await page.title(),
+                "status_code": response.status if response else None,
+                "slot_id": slot["slot_id"],
+                "captured_at": _now_iso(),
+                "data": extracted.get("data", {}),
+                "error": extracted.get("error"),
             }
             return result
         except Exception as exc:

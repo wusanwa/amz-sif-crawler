@@ -25,6 +25,12 @@ class SifQueryRequest(BaseModel):
     idle_ms: int = Field(default=2500, ge=0, le=60000)
 
 
+class AmazonExtractRequest(BaseModel):
+    url: str = Field(..., description="Amazon product URL")
+    wait_until: str = Field(default="domcontentloaded")
+    idle_ms: int = Field(default=1500, ge=0, le=60000)
+
+
 def build_app() -> FastAPI:
     app = FastAPI(title="Generic Amazon/SIF Browser Daemon")
     manager = GenericBrowserDaemonManager()
@@ -69,6 +75,18 @@ def build_app() -> FastAPI:
             return await service.fetch_sif_keywords(
                 asin=payload.asin,
                 capture_network=payload.capture_network,
+                idle_ms=payload.idle_ms,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/daemon/amazon/extract")
+    async def amazon_extract(payload: AmazonExtractRequest) -> dict[str, Any]:
+        try:
+            service = manager.get_service("amazon")
+            return await service.fetch_amazon_product(
+                url=payload.url,
+                wait_until=payload.wait_until,
                 idle_ms=payload.idle_ms,
             )
         except Exception as exc:

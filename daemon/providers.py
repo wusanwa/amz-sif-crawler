@@ -59,6 +59,7 @@ def get_provider_settings(provider: str) -> ProviderSettings:
             viewport_height=900,
             cdp_host=os.getenv("AMAZON_CDP_HOST", "127.0.0.1").strip() or "127.0.0.1",
             cdp_port=int(os.getenv("AMAZON_CDP_PORT", "9225") or 9225),
+            prefer_cdp_attach=True,
         )
     raise ValueError(f"Unsupported provider: {provider}")
 

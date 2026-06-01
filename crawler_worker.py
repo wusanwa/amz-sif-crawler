@@ -13,7 +13,6 @@ import shutil
 from collections import Counter
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from urllib.parse import urlparse
 
 # 配置日志
 logging.basicConfig(
@@ -40,8 +39,6 @@ def log_progress(asin: str, step: str):
 
 try:
     from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, LLMConfig
-    from crawl4ai.extraction_strategy import LLMExtractionStrategy
-    from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
     from pydantic import BaseModel, Field
     # 提前加载 litellm 以避免在其在异步任务内 lazy-import 时发生 Pydantic 段错误
     import litellm
@@ -56,6 +53,7 @@ except ImportError as e:
 
 from sif_query import fetch_sif_data_multilayer
 from sif_runtime import build_sif_browser_config
+from amazon_js_fetcher import fetch_amazon_data_js, normalize_amazon_input, extract_asin
 
 # ===== 环境探测与基础路径 =====
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -92,6 +90,14 @@ class ProductVariant(BaseModel):
 class AmazonData(BaseModel):
     product_title: str = Field(..., description="商品标题")
     main_price: Optional[str] = Field(None, description="主商品价格")
+    list_price: Optional[str] = Field(None, description="原价/划线价/Typical price")
+    savings_text: Optional[str] = Field(None, description="优惠文案，例如 -10%")
+    has_price_discount: bool = Field(False, description="是否存在价格折扣（如 List/Typical price 或百分比折扣）")
+    deal_type: Optional[str] = Field(None, description="促销类型，例如 Limited time deal")
+    is_limited_time_deal: bool = Field(False, description="是否为限时折扣")
+    coupon_text: Optional[str] = Field(None, description="优惠券文案，例如 Apply 15% coupon")
+    applied_coupon_text: Optional[str] = Field(None, description="已应用优惠券文案，例如 15% off coupon applied")
+    has_coupon: bool = Field(False, description="是否存在优惠券")
     model_number: Optional[str] = Field(None, description="型号，优先从商品标题的第一段提取")
     variants: Optional[List[ProductVariant]] = Field(None, description="页面展示的变体列表")
     parent_item_count: int = Field(0, description="变体总数量")
@@ -174,55 +180,12 @@ KEEP_SIF_BROWSER_OPEN = env_flag("KEEP_SIF_BROWSER_OPEN", False)
 USE_SIF_DAEMON = bool(str(os.getenv("SIF_DAEMON_URL", "") or "").strip())
 
 
-def _extract_asin(candidate: str) -> Optional[str]:
-    if not candidate:
-        return None
-    match = re.search(r"\b(B[A-Z0-9]{9})\b", candidate.upper())
-    return match.group(1) if match else None
-
-
 def should_cleanup_sif_browser() -> bool:
     return not KEEP_SIF_BROWSER_OPEN and not USE_SIF_DAEMON
 
 
 def _build_canonical_amazon_url(asin: str) -> str:
     return f"https://www.amazon.com/dp/{asin}"
-
-
-def normalize_amazon_input(input_value: Any) -> Dict[str, Any]:
-    """将用户输入统一成可用于 crawl4ai 的 Amazon URL，并尽量提取 ASIN。"""
-    raw = str(input_value or "").strip()
-    if not raw:
-        return {"ok": False, "error": "Empty URL/ASIN"}
-
-    asin_direct = _extract_asin(raw)
-    if asin_direct and re.fullmatch(r"B[A-Z0-9]{9}", raw.upper()):
-        return {"ok": True, "url": _build_canonical_amazon_url(asin_direct), "asin": asin_direct}
-
-    # 兼容缺少 scheme 的常见写法（如 www.amazon.com/...）
-    normalized = raw
-    if re.match(r"^(www\.)", normalized, flags=re.IGNORECASE):
-        normalized = f"https://{normalized}"
-    elif re.match(r"^[a-z0-9.-]+\.[a-z]{2,}(/.*)?$", normalized, flags=re.IGNORECASE):
-        normalized = f"https://{normalized}"
-
-    allowed_prefixes = ("http://", "https://", "file://", "raw:")
-    if not normalized.lower().startswith(allowed_prefixes):
-        if asin_direct:
-            return {"ok": True, "url": _build_canonical_amazon_url(asin_direct), "asin": asin_direct}
-        return {"ok": False, "error": "Invalid URL scheme"}
-
-    asin = asin_direct
-    if normalized.lower().startswith(("http://", "https://")):
-        parsed = urlparse(normalized)
-        host = (parsed.netloc or "").lower()
-        is_amazon = "amazon." in host or host.endswith("amzn.to")
-        if is_amazon and asin:
-            normalized = _build_canonical_amazon_url(asin)
-        elif is_amazon and not asin:
-            return {"ok": False, "error": "Amazon URL missing ASIN"}
-
-    return {"ok": True, "url": normalized, "asin": asin or "UNKNOWN"}
 
 
 def _extract_text_by_id(html_text: str, element_id: str) -> str:
@@ -269,8 +232,15 @@ def _extract_amazon_parent_item_count(raw_html: str = "", markdown_text: str = "
     structural_candidates: List[int] = []
     html_text = raw_html or ""
 
+    def _extract_candidate_li_tags(block: str) -> List[str]:
+        return re.findall(
+            r'<li\b[^>]*data-asin=["\'][^"\']+["\'][^>]*>',
+            block,
+            flags=re.IGNORECASE,
+        )
+
     def _count_option_lis(block: str) -> int:
-        li_tags = re.findall(r'<li\b[^>]*>', block, flags=re.IGNORECASE)
+        li_tags = _extract_candidate_li_tags(block)
         direct_option_count = 0
         seen_keys = set()
 
@@ -351,11 +321,7 @@ def _extract_amazon_parent_item_count(raw_html: str = "", markdown_text: str = "
             structural_candidates.append(direct_option_count)
 
     # 5) 最后兜底：直接统计页面中所有 inline twister 的真实选项 li。
-    global_twister_lis = re.findall(
-        r'<li\b[^>]*data-asin=["\'][^"\']+["\'][^>]*class=["\'][^"\']*(?:inline-twister-swatch|dimension-value-list-item)[^"\']*["\'][^>]*>',
-        html_text,
-        flags=re.IGNORECASE,
-    )
+    global_twister_lis = _extract_candidate_li_tags(html_text)
     if global_twister_lis:
         structural_candidates.append(_count_option_lis("".join(global_twister_lis)))
 
@@ -377,6 +343,13 @@ def _extract_amazon_variants(raw_html: str = "") -> List[Dict[str, Any]]:
     if not html_text:
         return []
 
+    def _find_li_blocks(block: str) -> List[str]:
+        return re.findall(
+            r'<li\b[^>]*data-asin=["\'][^"\']+["\'][^>]*>.*?</li>',
+            block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
     list_blocks = re.findall(
         r'<ul\b[^>]*class=["\'][^"\']*(?:dimension-values-list|a-button-toggle-group)[^"\']*["\'][^>]*>.*?</ul>',
         html_text,
@@ -385,14 +358,10 @@ def _extract_amazon_variants(raw_html: str = "") -> List[Dict[str, Any]]:
 
     li_blocks: List[str] = []
     for block in list_blocks:
-        li_blocks.extend(re.findall(r'<li\b[^>]*data-asin=["\'][^"\']+["\'][^>]*>.*?</li>', block, flags=re.IGNORECASE | re.DOTALL))
+        li_blocks.extend(_find_li_blocks(block))
 
     if not li_blocks:
-        li_blocks = re.findall(
-            r'<li\b[^>]*data-asin=["\'][^"\']+["\'][^>]*class=["\'][^"\']*(?:inline-twister-swatch|dimension-value-list-item)[^"\']*["\'][^>]*>.*?</li>',
-            html_text,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
+        li_blocks = _find_li_blocks(html_text)
 
     variants: List[Dict[str, Any]] = []
     seen_asins = set()
@@ -575,96 +544,23 @@ async def fetch_amazon_data_multilayer(
             return {"data": cached_data, "error": None}
 
     log_progress(asin, "🛒 准备获取 Amazon 数据...")
-    
-    amz_extract = LLMExtractionStrategy(
-        llm_config=llm_cfg, schema=AmazonData.model_json_schema(),
-        instruction="提取商品名称 (product_title), 主价格 (main_price), 型号 (model_number), 变体列表 (variants: 页面展示的全部变体), 变体总数量 (parent_item_count)。注意：型号优先从标题第一个逗号前提取。范围在 #dp-container。"
-    )
-    
+
     try:
-        log_progress(asin, "🛒 正在启动 Amazon 浏览器实例...")
-        async with AsyncWebCrawler(config=browser_cfg) as crawler:
-            log_progress(asin, "🛒 Amazon 页面加载中 (arun)...")
-            res = await asyncio.wait_for(
-                crawler.arun(
-                    url=url,
-                    config=CrawlerRunConfig(
-                        extraction_strategy=amz_extract, 
-                        markdown_generator=DefaultMarkdownGenerator(content_filter=None), 
-                        cache_mode=CacheMode.BYPASS, 
-                        css_selector="#dp-container, #main, #container, .a-section", 
-                        wait_for="css:#productTitle, #dp-container, .a-error-code, #g, .s-result-list",
-                        wait_until="commit", # 最新推荐策略：配合 wait_for 使用，极致性能
-                        # 极其激进的标签排除
-                        excluded_tags=['script', 'style', 'path', 'svg', 'nav', 'footer', 'header', 'aside', 'iframe', 'canvas', 'noscript', 'form'],
-                        excluded_selector="#nav-belt, #nav-main, #nav-footer, #navbar, #apb-desktop-browse-navigation-left-column",
-                        process_iframes=False,
-                        remove_overlay_elements=True,
-                        page_timeout=35000 
-                    )
-                ),
-                timeout=50 # 额外给 LLM 留些余地
-            )
-            log_progress(asin, f"✨ Amazon arun 返回成功: {res.success} | Status: {res.status_code}")
-            
-            # --- 快速失败判定 ---
-            if not res.success:
-                err = getattr(res, 'error_message', '提取失败或内容为空')
-                log_progress(asin, f"❌ Amazon 加载失败: {err}")
-                return {"data": {}, "error": err}
-
-            # 1. 状态码判定
-            if res.status_code == 404:
-                log_progress(asin, "❌ 页面不存在 (404)")
-                return {"data": {}, "error": "Amazon 404: Page Not Found"}
-            if res.status_code == 503 or "robot check" in (res.markdown or "").lower():
-                log_progress(asin, "❌ 触发机器人检查或被拦截 (503/CAPTCHA)")
-                return {"data": {}, "error": "Amazon Blocked/CAPTCHA"}
-
-            # 2. 页面类型判定 (利用 wait_for 捕获的特征)
-            cleaned_content = (res.cleaned_html or "").lower()
-            if "s-result-list" in cleaned_content or "search-results" in cleaned_content:
-                log_progress(asin, "⚠️ 检测到搜索结果页，非商品详情页")
-                return {"data": {}, "error": "Wrong Page Type: Search Results"}
-
-            if res.extracted_content:
-                log_progress(asin, "✨ AI 正在解析 Amazon JSON 内容...")
-                data = json.loads(res.extracted_content)
-                if isinstance(data, list) and len(data) > 0: data = data[0]
-                data = _normalize_amazon_data(
-                    data,
-                    raw_html=res.cleaned_html or "",
-                    markdown_text=res.markdown or "",
-                )
-                
-                # 3. 最终标题校验
-                if not data.get("product_title"):
-                    log_progress(asin, "⚠️ 页面结构不匹配，无法提取标题")
-                    return {"data": {}, "error": "Invalid Product Page: No Title Found"}
-
-                # 额外补充逻辑：模型通常是标题的第一段（以逗号、中划线、竖线分隔）
-                current_model = str(data.get("model_number") or "").strip()
-                is_asin = bool(re.match(r'^B[A-Z0-9]{9}$', current_model))
-                
-                if not current_model or current_model in ["N/A", "None", ""] or is_asin:
-                    title = data.get("product_title", "")
-                    # 匹配逗号、竖线、冒号、或带有空格的中划线
-                    segments = re.split(r'[,|\|:]|\s-\s', title)
-                    if segments:
-                        candidate = segments[0].strip()
-                        # 再次检查候选词是否为 ASIN
-                        if not re.match(r'^B[A-Z0-9]{9}$', candidate):
-                            data["model_number"] = candidate
-                        elif len(segments) > 1:
-                            data["model_number"] = segments[1].strip()
-                
-                log_progress(asin, "✅ Amazon 数据提取成功，进入缓存")
-                db_cache.set(f"amz_{asin}", data, expire=CACHE_EXPIRY_SEC)
-                return {"data": data, "error": None}
-            
-            err = getattr(res, 'error_message', '提取失败或内容为空')
-            log_progress(asin, f"❌ Amazon 抓取失败: {err}")
-            return {"data": {}, "error": err}
+        result = await fetch_amazon_data_js(
+            url=url,
+            asin=asin,
+            profile_dir=AMAZON_PROFILE,
+            headless=browser_cfg.headless,
+            user_agent=getattr(browser_cfg, "user_agent", None) or "",
+            extra_args=getattr(browser_cfg, "extra_args", None) or [],
+            log_progress=log_progress,
+        )
+        if not result.get("error"):
+            log_progress(asin, "✅ Amazon JS 提取成功，进入缓存")
+            db_cache.set(f"amz_{asin}", result["data"], expire=CACHE_EXPIRY_SEC)
+        else:
+            log_progress(asin, f"❌ Amazon JS 抓取失败: {result.get('error')}")
+        return result
     except asyncio.TimeoutError:
         log_progress(asin, "⏰ Amazon 抓取超时，尝试 DOM 回退")
         return await fetch_amazon_data_dom_fallback(url, asin, browser_cfg)
@@ -769,7 +665,7 @@ async def main_worker(manual_urls: Optional[List[str]] = None, debug_mode: Optio
                 )
                 continue
 
-            asin = _extract_asin(str(raw_input or "")) or "UNKNOWN"
+            asin = extract_asin(str(raw_input or "")) or "UNKNOWN"
             reason = normalized.get("error", "Invalid input")
             log_progress(asin, f"❌ 输入无效，已跳过: {raw_input} | 原因: {reason}")
             results.append(
@@ -780,6 +676,14 @@ async def main_worker(manual_urls: Optional[List[str]] = None, debug_mode: Optio
                     "failure_reason": f"Invalid Input: {reason}",
                     "amazon_title": "",
                     "amazon_price": "",
+                    "amazon_list_price": "",
+                    "amazon_savings_text": "",
+                    "amazon_has_price_discount": False,
+                    "amazon_deal_type": "",
+                    "amazon_is_limited_time_deal": False,
+                    "amazon_coupon_text": "",
+                    "amazon_applied_coupon_text": "",
+                    "amazon_has_coupon": False,
                     "amazon_model": "",
                     "amazon_total_variants": 0,
                     "amazon_variants": [],
@@ -857,6 +761,14 @@ async def main_worker(manual_urls: Optional[List[str]] = None, debug_mode: Optio
                     'failure_reason': combined_error,
                     'amazon_title': safe_get(amazon_data, 'product_title'),
                     'amazon_price': safe_get(amazon_data, 'main_price'),
+                    'amazon_list_price': safe_get(amazon_data, 'list_price'),
+                    'amazon_savings_text': safe_get(amazon_data, 'savings_text'),
+                    'amazon_has_price_discount': bool(amazon_data.get('has_price_discount', False)) if isinstance(amazon_data, dict) else False,
+                    'amazon_deal_type': safe_get(amazon_data, 'deal_type'),
+                    'amazon_is_limited_time_deal': bool(amazon_data.get('is_limited_time_deal', False)) if isinstance(amazon_data, dict) else False,
+                    'amazon_coupon_text': safe_get(amazon_data, 'coupon_text'),
+                    'amazon_applied_coupon_text': safe_get(amazon_data, 'applied_coupon_text'),
+                    'amazon_has_coupon': bool(amazon_data.get('has_coupon', False)) if isinstance(amazon_data, dict) else False,
                     'amazon_model': safe_get(amazon_data, 'model_number'),
                     'amazon_total_variants': safe_get(amazon_data, 'parent_item_count', 0),
                     'amazon_variants': safe_get(amazon_data, 'variants', []),
