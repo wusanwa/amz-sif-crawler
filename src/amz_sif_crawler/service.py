@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import json
 import logging
 import sys
@@ -14,10 +15,23 @@ from amz_sif_crawler.fetchers.sif import fetch_sif_data
 from amz_sif_crawler.runtime.cache import open_cache
 from amz_sif_crawler.runtime.daemon_client import call_daemon
 from amz_sif_crawler.runtime.config import AppConfig, ensure_runtime_dirs, load_app_config
-from amz_sif_crawler.utils import extract_asin, merge_failure_reason, normalize_amazon_input
+from amz_sif_crawler.utils import build_canonical_amazon_url, extract_asin, merge_failure_reason, normalize_amazon_input
 
 
 logger = logging.getLogger(__name__)
+
+DAILY_REPORT_HEADERS = [
+    "URL链接",
+    "产品型号",
+    "价格",
+    "核心词-1",
+    "核心词自然位-1",
+    "核心词广告位-1",
+    "核心词-2",
+    "核心词自然位-2",
+    "核心词广告位-2",
+    "父体数量",
+]
 
 
 def log_progress(asin: str, step: str) -> None:
@@ -138,23 +152,77 @@ async def crawl_urls(
             )
 
         output_path = _resolve_output_path(app_config.base_dir, outfile)
+        timings = {item["asin"]: time.perf_counter() for item in normalized_inputs}
+        amazon_results: dict[str, dict[str, Any]] = {
+            item["asin"]: {"data": {}, "error": ""} for item in normalized_inputs
+        }
+        sif_results: dict[str, dict[str, Any]] = {
+            item["asin"]: {"data": [], "error": ""} for item in normalized_inputs
+        }
+
+        amazon_batch_task = None
+        sif_batch_task = None
+
+        if mode in {"both", "amazon"} and normalized_inputs:
+            amazon_batch_task = asyncio.gather(
+                *[
+                    _fetch_amazon_for_asin(
+                        asin=item["asin"],
+                        url=item["url"],
+                        app_config=app_config,
+                        cache=cache,
+                    )
+                    for item in normalized_inputs
+                ]
+            )
+
+        if mode in {"both", "sif"} and normalized_inputs:
+            sif_batch_task = asyncio.gather(
+                *[
+                    _fetch_sif_for_asin(
+                        asin=item["asin"],
+                        app_config=app_config,
+                        cache=cache,
+                    )
+                    for item in normalized_inputs
+                ]
+            )
+
+        if amazon_batch_task and sif_batch_task:
+            amazon_batch, sif_batch = await asyncio.gather(amazon_batch_task, sif_batch_task)
+            amazon_results.update(
+                {
+                    item["asin"]: result
+                    for item, result in zip(normalized_inputs, amazon_batch, strict=True)
+                }
+            )
+            sif_results.update(
+                {
+                    item["asin"]: result
+                    for item, result in zip(normalized_inputs, sif_batch, strict=True)
+                }
+            )
+        elif amazon_batch_task:
+            amazon_batch = await amazon_batch_task
+            amazon_results.update(
+                {
+                    item["asin"]: result
+                    for item, result in zip(normalized_inputs, amazon_batch, strict=True)
+                }
+            )
+        elif sif_batch_task:
+            sif_batch = await sif_batch_task
+            sif_results.update(
+                {
+                    item["asin"]: result
+                    for item, result in zip(normalized_inputs, sif_batch, strict=True)
+                }
+            )
+
         for item in normalized_inputs:
             asin = item["asin"]
-            url = item["url"]
-            item_started_at = time.perf_counter()
-
-            amazon_result = {"data": {}, "error": ""}
-            sif_result = {"data": [], "error": ""}
-
-            if mode == "both":
-                amazon_result, sif_result = await asyncio.gather(
-                    _fetch_amazon_for_asin(asin=asin, url=url, app_config=app_config, cache=cache),
-                    _fetch_sif_for_asin(asin=asin, app_config=app_config, cache=cache),
-                )
-            elif mode == "amazon":
-                amazon_result = await _fetch_amazon_for_asin(asin=asin, url=url, app_config=app_config, cache=cache)
-            elif mode == "sif":
-                sif_result = await _fetch_sif_for_asin(asin=asin, app_config=app_config, cache=cache)
+            amazon_result = amazon_results[asin]
+            sif_result = sif_results[asin]
 
             amazon_data = amazon_result.get("data", {})
             sif_rankings = sif_result.get("data", [])
@@ -174,7 +242,7 @@ async def crawl_urls(
             if output_path:
                 with output_path.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-            log_progress(asin, f"⏱️ 总耗时: {time.perf_counter() - item_started_at:.2f}s")
+            log_progress(asin, f"⏱️ 总耗时: {time.perf_counter() - timings[asin]:.2f}s")
 
         return results
     finally:
@@ -204,6 +272,7 @@ def _build_result(
         "asin": asin,
         "status": "SUCCESS" if not failure_reason else "PARTIAL",
         "failure_reason": failure_reason,
+        "amazon_url": _safe_get(amazon_data, "current_url", build_canonical_amazon_url(asin)),
         "amazon_title": _safe_get(amazon_data, "product_title"),
         "amazon_price": _safe_get(amazon_data, "main_price"),
         "amazon_list_price": _safe_get(amazon_data, "list_price"),
@@ -220,6 +289,51 @@ def _build_result(
         "sif_1_kw": _safe_get(sif_rankings[0] if sif_rankings else {}, "keyword"),
         "full_sif": sif_rankings,
     }
+
+
+def _clean_csv_price(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.startswith("$"):
+        return text[1:]
+    return text
+
+
+def _report_rank(rankings: list[dict[str, Any]], index: int, key: str) -> str:
+    item = rankings[index] if len(rankings) > index and isinstance(rankings[index], dict) else {}
+    value = item.get(key, "") if isinstance(item, dict) else ""
+    return str(value or "").strip() or "/"
+
+
+def build_daily_report_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in results:
+        rankings = item.get("full_sif", []) if isinstance(item, dict) else []
+        rows.append(
+            {
+                "URL链接": str(item.get("amazon_url") or build_canonical_amazon_url(str(item.get("asin") or "UNKNOWN"))),
+                "产品型号": str(item.get("amazon_model") or ""),
+                "价格": _clean_csv_price(item.get("amazon_price")),
+                "核心词-1": _report_rank(rankings, 0, "keyword"),
+                "核心词自然位-1": _report_rank(rankings, 0, "organic_rank"),
+                "核心词广告位-1": _report_rank(rankings, 0, "ad_rank"),
+                "核心词-2": _report_rank(rankings, 1, "keyword"),
+                "核心词自然位-2": _report_rank(rankings, 1, "organic_rank"),
+                "核心词广告位-2": _report_rank(rankings, 1, "ad_rank"),
+                "父体数量": str(item.get("amazon_total_variants") or 0),
+            }
+        )
+    return rows
+
+
+def export_daily_report_csv(results: list[dict[str, Any]], output_path: str | Path) -> str:
+    path = Path(output_path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = build_daily_report_rows(results)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=DAILY_REPORT_HEADERS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return str(path)
 
 
 async def crawl_and_wrap(
