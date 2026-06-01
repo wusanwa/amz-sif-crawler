@@ -4,6 +4,7 @@ import asyncio
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -53,9 +54,18 @@ def detect_sif_auth_state(url: str = "", text: str = "") -> str:
 
 
 async def extract_sif_top3_from_page(page: Page) -> list[dict[str, str]]:
+    return await extract_sif_top3_from_page_with_retry(page, attempts=40, interval_ms=500)
+
+
+async def extract_sif_top3_from_page_with_retry(
+    page: Page,
+    *,
+    attempts: int = 8,
+    interval_ms: int = 250,
+) -> list[dict[str, str]]:
     return await page.evaluate(
         """
-        async () => {
+        async ({ attempts, intervalMs }) => {
           const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
           const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
           const readRows = () => {
@@ -94,19 +104,18 @@ async def extract_sif_top3_from_page(page: Page) -> list[dict[str, str]]:
           };
 
           let stableRows = [];
-          for (let i = 0; i < 40; i++) {
+          for (let i = 0; i < attempts; i++) {
             const rows = readRows();
             const ready = rows.length >= 3 && rows.every(item =>
               item.keyword &&
               item.organic_rank &&
-              item.organic_rank !== '-' &&
               item.ad_rank
             );
             if (ready) {
               stableRows = rows;
               break;
             }
-            await wait(500);
+            await wait(intervalMs);
           }
 
           const rows = stableRows.length ? stableRows : readRows();
@@ -118,7 +127,8 @@ async def extract_sif_top3_from_page(page: Page) -> list[dict[str, str]]:
             }))
             .filter((item) => item.keyword);
         }
-        """
+        """,
+        {"attempts": max(1, attempts), "intervalMs": max(50, interval_ms)},
     )
 
 
@@ -145,6 +155,7 @@ async def fetch_sif_data(
     profile_candidates = [str(profile_dir)]
     cloned_profile = clone_profile_dir(profile_dir, prefix="sif-crawl-")
     profile_candidates.append(cloned_profile)
+    started_at = time.perf_counter()
 
     try:
         last_error = ""
@@ -162,19 +173,11 @@ async def fetch_sif_data(
                 ) as context:
                     page = context.pages[0] if context.pages else await context.new_page()
                     await page.goto(sif_url, wait_until="domcontentloaded", timeout=60000)
-                    await page.wait_for_timeout(1500)
+                    await page.wait_for_timeout(300)
 
-                    for _ in range(20):
-                        rankings = await extract_sif_top3_from_page(page)
-                        if rankings:
-                            return {"data": rankings, "error": None}
-                        body_text = await page.locator("body").inner_text()
-                        state = detect_sif_auth_state(page.url, body_text)
-                        if state == "login_required":
-                            return try_refresh_sif_profile(asin, log_progress, project_root)
-                        if state == "challenge":
-                            return {"data": [], "error": "SIF Challenge/CAPTCHA"}
-                        await page.wait_for_timeout(500)
+                    rankings = await extract_sif_top3_from_page(page)
+                    if rankings:
+                        return {"data": rankings, "error": None}
 
                     body_text = await page.locator("body").inner_text()
                     state = detect_sif_auth_state(page.url, body_text)
@@ -189,4 +192,5 @@ async def fetch_sif_data(
                 last_error = summarize_browser_error(exc)
         return {"data": [], "error": last_error or "SIF Browser Launch Failed"}
     finally:
+        log_progress(asin, f"⏱️ SIF 耗时: {time.perf_counter() - started_at:.2f}s")
         shutil.rmtree(cloned_profile, ignore_errors=True)

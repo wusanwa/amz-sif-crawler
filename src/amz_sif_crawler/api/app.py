@@ -18,8 +18,8 @@ mcp = FastMCP("amazon-sif-crawler-mcp", host=HOST)
 
 
 @mcp.tool()
-async def track_competitor_intelligence(urls: list[str]) -> str:
-    payload = await crawl_and_wrap(urls)
+async def track_competitor_intelligence(urls: list[str], mode: str = "both") -> str:
+    payload = await crawl_and_wrap(urls, mode=mode)
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -40,7 +40,8 @@ def build_app():
     async def crawl_endpoint(request):
         data = await request.json()
         urls = data.get("urls", [])
-        return JSONResponse(await crawl_and_wrap(urls))
+        mode = str(data.get("mode", "both") or "both")
+        return JSONResponse(await crawl_and_wrap(urls, mode=mode))
 
     async def health_endpoint(_request):
         return JSONResponse({"status": "ok", "service": "amz-sif-crawler"})

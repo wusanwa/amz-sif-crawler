@@ -8,7 +8,47 @@ services:
       - DOCKER_ENV=1
       - PORT=8000
       - CORS_ALLOW_ORIGINS=*
+      - AMAZON_DAEMON_URL=http://amazon-daemon:8001
+      - SIF_DAEMON_URL=http://sif-daemon:8002
     volumes:
       - ./runtime_data:/app/runtime_data
       - ./config:/app/config
+      - ./src:/app/src
+      - ./mcp_server.py:/app/mcp_server.py
+    depends_on:
+      - amazon-daemon
+      - sif-daemon
+    restart: unless-stopped
+
+  amazon-daemon:
+    build: .
+    container_name: amz-sif-amazon-daemon
+    command: ["python", "daemon_server.py"]
+    environment:
+      - DOCKER_ENV=1
+      - PORT=8001
+      - DAEMON_MODE=amazon
+      - AMAZON_HEADLESS=1
+    volumes:
+      - ./runtime_data:/app/runtime_data
+      - ./config:/app/config
+      - ./src:/app/src
+      - ./daemon_server.py:/app/daemon_server.py
+    restart: unless-stopped
+
+  sif-daemon:
+    build: .
+    container_name: amz-sif-sif-daemon
+    command: ["python", "daemon_server.py"]
+    environment:
+      - DOCKER_ENV=1
+      - PORT=8002
+      - DAEMON_MODE=sif
+      - SIF_HEADLESS=1
+      - SIF_DAEMON_MAX_TABS=3
+    volumes:
+      - ./runtime_data:/app/runtime_data
+      - ./config:/app/config
+      - ./src:/app/src
+      - ./daemon_server.py:/app/daemon_server.py
     restart: unless-stopped

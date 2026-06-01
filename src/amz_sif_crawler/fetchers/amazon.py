@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
+import time
 from typing import Any, Callable
 
 from playwright.async_api import Page
@@ -143,6 +144,7 @@ async def fetch_amazon_data(
     log_progress: Callable[[str, str], None],
 ) -> dict[str, Any]:
     temp_profile = tempfile.mkdtemp(prefix="amz-crawl-", dir="/tmp")
+    started_at = time.perf_counter()
     try:
         log_progress(asin, "🛒 使用 Playwright + 页面内 JS 抓取 Amazon 数据...")
         async with open_persistent_context(
@@ -167,4 +169,5 @@ async def fetch_amazon_data(
     except Exception as exc:
         return {"data": {}, "error": summarize_browser_error(exc)}
     finally:
+        log_progress(asin, f"⏱️ Amazon 耗时: {time.perf_counter() - started_at:.2f}s")
         shutil.rmtree(temp_profile, ignore_errors=True)

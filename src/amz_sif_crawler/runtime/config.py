@@ -28,6 +28,9 @@ class AppConfig:
     cache_dir: Path
     amazon_profile_dir: Path
     sif_profile_dir: Path
+    amazon_daemon_url: str
+    sif_daemon_url: str
+    cache_enabled: bool
     cache_expiry_sec: int
     debug_mode: bool
     in_docker: bool
@@ -59,6 +62,9 @@ def load_app_config(base_dir: str | Path | None = None) -> AppConfig:
         cache_dir=cache_dir,
         amazon_profile_dir=Path(os.getenv("AMAZON_PROFILE_DIR", profile_root / "amazon")).resolve(),
         sif_profile_dir=Path(os.getenv("SIF_PROFILE_DIR", profile_root / "sif")).resolve(),
+        amazon_daemon_url=str(os.getenv("AMAZON_DAEMON_URL", "")).strip(),
+        sif_daemon_url=str(os.getenv("SIF_DAEMON_URL", "")).strip(),
+        cache_enabled=_env_flag("CACHE_ENABLED", bool(settings.get("CACHE_ENABLED", False))),
         cache_expiry_sec=int(os.getenv("CACHE_EXPIRY_SEC", settings.get("CACHE_EXPIRY_SEC", 80000))),
         debug_mode=_env_flag("DEBUG_MODE", bool(settings.get("DEBUG_MODE", False))),
         in_docker=os.getenv("DOCKER_ENV") == "1",

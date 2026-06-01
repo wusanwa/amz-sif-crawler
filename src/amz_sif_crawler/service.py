@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from typing import Any
 from amz_sif_crawler.fetchers.amazon import fetch_amazon_data
 from amz_sif_crawler.fetchers.sif import fetch_sif_data
 from amz_sif_crawler.runtime.cache import open_cache
+from amz_sif_crawler.runtime.daemon_client import call_daemon
 from amz_sif_crawler.runtime.config import AppConfig, ensure_runtime_dirs, load_app_config
 from amz_sif_crawler.utils import extract_asin, merge_failure_reason, normalize_amazon_input
 
@@ -31,6 +33,71 @@ def _safe_get(data: dict[str, Any] | None, key: str, default: Any = "") -> Any:
     return default if value is None else value
 
 
+async def _fetch_amazon_for_asin(
+    *,
+    asin: str,
+    url: str,
+    app_config: AppConfig,
+    cache: Any,
+) -> dict[str, Any]:
+    cached_amazon = None
+    if cache and not app_config.debug_mode:
+        cached_amazon = cache.get(f"amz_{asin}")
+    if cached_amazon:
+        log_progress(asin, "🛒 命中 Amazon 缓存")
+        return {"data": cached_amazon, "error": None}
+    if app_config.amazon_daemon_url:
+        log_progress(asin, "🛒 调用 Amazon daemon...")
+        result = await call_daemon(
+            base_url=app_config.amazon_daemon_url,
+            path="/fetch",
+            payload={"url": url, "asin": asin},
+        )
+    else:
+        result = await fetch_amazon_data(
+            url=url,
+            asin=asin,
+            profile_dir=str(app_config.amazon_profile_dir),
+            headless=app_config.amazon_headless,
+            log_progress=log_progress,
+        )
+    if cache and not result.get("error"):
+        cache.set(f"amz_{asin}", result["data"], expire=app_config.cache_expiry_sec)
+    return result
+
+
+async def _fetch_sif_for_asin(
+    *,
+    asin: str,
+    app_config: AppConfig,
+    cache: Any,
+) -> dict[str, Any]:
+    cached_sif = None
+    if cache and not app_config.debug_mode:
+        cached_sif = cache.get(f"sif_{asin}")
+    if cached_sif:
+        log_progress(asin, "🔍 命中 SIF 缓存")
+        return {"data": cached_sif, "error": None}
+    if app_config.sif_daemon_url:
+        log_progress(asin, "🔍 调用 SIF daemon...")
+        result = await call_daemon(
+            base_url=app_config.sif_daemon_url,
+            path="/fetch",
+            payload={"asin": asin},
+        )
+    else:
+        result = await fetch_sif_data(
+            asin=asin,
+            profile_dir=str(app_config.sif_profile_dir),
+            headless=app_config.sif_headless,
+            log_progress=log_progress,
+            project_root=Path(app_config.base_dir),
+        )
+    if cache and not result.get("error"):
+        cache.set(f"sif_{asin}", result["data"], expire=app_config.cache_expiry_sec)
+    return result
+
+
 async def crawl_urls(
     urls: list[str],
     *,
@@ -40,7 +107,7 @@ async def crawl_urls(
 ) -> list[dict[str, Any]]:
     app_config = config or load_app_config()
     ensure_runtime_dirs(app_config)
-    cache = open_cache(str(app_config.cache_dir))
+    cache = open_cache(str(app_config.cache_dir)) if app_config.cache_enabled else None
     results: list[dict[str, Any]] = []
     mode = (mode or "both").strip().lower()
     if mode not in {"both", "amazon", "sif"}:
@@ -74,41 +141,20 @@ async def crawl_urls(
         for item in normalized_inputs:
             asin = item["asin"]
             url = item["url"]
+            item_started_at = time.perf_counter()
 
             amazon_result = {"data": {}, "error": ""}
             sif_result = {"data": [], "error": ""}
 
-            if mode in {"both", "amazon"}:
-                cached_amazon = None if app_config.debug_mode else cache.get(f"amz_{asin}")
-                if cached_amazon:
-                    log_progress(asin, "🛒 命中 Amazon 缓存")
-                    amazon_result = {"data": cached_amazon, "error": None}
-                else:
-                    amazon_result = await fetch_amazon_data(
-                        url=url,
-                        asin=asin,
-                        profile_dir=str(app_config.amazon_profile_dir),
-                        headless=app_config.amazon_headless,
-                        log_progress=log_progress,
-                    )
-                    if not amazon_result.get("error"):
-                        cache.set(f"amz_{asin}", amazon_result["data"], expire=app_config.cache_expiry_sec)
-
-            if mode in {"both", "sif"}:
-                cached_sif = None if app_config.debug_mode else cache.get(f"sif_{asin}")
-                if cached_sif:
-                    log_progress(asin, "🔍 命中 SIF 缓存")
-                    sif_result = {"data": cached_sif, "error": None}
-                else:
-                    sif_result = await fetch_sif_data(
-                        asin=asin,
-                        profile_dir=str(app_config.sif_profile_dir),
-                        headless=app_config.sif_headless,
-                        log_progress=log_progress,
-                        project_root=Path(app_config.base_dir),
-                    )
-                    if not sif_result.get("error"):
-                        cache.set(f"sif_{asin}", sif_result["data"], expire=app_config.cache_expiry_sec)
+            if mode == "both":
+                amazon_result, sif_result = await asyncio.gather(
+                    _fetch_amazon_for_asin(asin=asin, url=url, app_config=app_config, cache=cache),
+                    _fetch_sif_for_asin(asin=asin, app_config=app_config, cache=cache),
+                )
+            elif mode == "amazon":
+                amazon_result = await _fetch_amazon_for_asin(asin=asin, url=url, app_config=app_config, cache=cache)
+            elif mode == "sif":
+                sif_result = await _fetch_sif_for_asin(asin=asin, app_config=app_config, cache=cache)
 
             amazon_data = amazon_result.get("data", {})
             sif_rankings = sif_result.get("data", [])
@@ -128,10 +174,12 @@ async def crawl_urls(
             if output_path:
                 with output_path.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            log_progress(asin, f"⏱️ 总耗时: {time.perf_counter() - item_started_at:.2f}s")
 
         return results
     finally:
-        cache.close()
+        if cache:
+            cache.close()
 
 
 def _resolve_output_path(base_dir: Path, outfile: str | None) -> Path | None:

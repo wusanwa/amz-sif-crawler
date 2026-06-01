@@ -1,4 +1,5 @@
 from amz_sif_crawler.service import _build_result
+from amz_sif_crawler.runtime.config import load_app_config
 
 
 def test_build_result_success_shape():
@@ -16,3 +17,8 @@ def test_build_result_success_shape():
     assert payload["status"] == "SUCCESS"
     assert payload["amazon_title"] == "Example Product"
     assert payload["sif_1_kw"] == "sample"
+
+
+def test_cache_disabled_by_default():
+    config = load_app_config()
+    assert config.cache_enabled is False

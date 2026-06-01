@@ -1,11 +1,11 @@
-FROM mcr.microsoft.com/playwright/python:v1.53.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.52.0-noble
 
 WORKDIR /app
 
 COPY pyproject.toml requirements.txt ./
 COPY src ./src
 COPY config ./config
-COPY mcp_server.py mcp_gateway.py crawler_worker.py sif_login.py ./
+COPY mcp_server.py mcp_gateway.py crawler_worker.py sif_login.py daemon_server.py crawl_once.py ./
 
 RUN python -m pip install --upgrade pip setuptools wheel
 RUN python -m pip install --no-cache-dir -r requirements.txt
