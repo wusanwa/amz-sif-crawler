@@ -14,6 +14,7 @@ from amz_sif_crawler.fetchers.sif import (
     extract_sif_top3_from_page,
 )
 from amz_sif_crawler.runtime.browser import COMMON_BROWSER_ARGS
+from amz_sif_crawler.sif_auth import ensure_sif_logged_in, load_sif_credentials
 
 
 class PersistentBrowserDaemon:
@@ -23,10 +24,12 @@ class PersistentBrowserDaemon:
         mode: str,
         profile_dir: str | Path,
         headless: bool,
+        base_dir: str | Path,
     ) -> None:
         self.mode = mode
         self.profile_dir = str(profile_dir)
         self.headless = headless
+        self.base_dir = Path(base_dir).resolve()
         self.playwright: Playwright | None = None
         self.context: BrowserContext | None = None
         self.page: Page | None = None
@@ -93,19 +96,27 @@ class PersistentBrowserDaemon:
             raise RuntimeError("SIF daemon page pool is not ready")
         page = await self.sif_page_queue.get()
         try:
-            sif_url = f"https://www.sif.com/reverse?country=US&asin={asin}&isListingSearch=false&trafficType="
-            await page.goto(sif_url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(300)
-            rankings = await extract_sif_top3_from_page(page)
-            if rankings:
-                return {"data": rankings, "error": None}
+            phone, password = load_sif_credentials(self.base_dir)
+            for attempt in range(2):
+                sif_url = f"https://www.sif.com/reverse?country=US&asin={asin}&isListingSearch=false&trafficType="
+                await page.goto(sif_url, wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(300)
+                rankings = await extract_sif_top3_from_page(page)
+                if rankings:
+                    return {"data": rankings, "error": None}
 
-            body_text = await page.locator("body").inner_text()
-            state = detect_sif_auth_state(page.url, body_text)
-            if state == "login_required":
-                return {"data": [], "error": "SIF Login Required"}
-            if state == "challenge":
-                return {"data": [], "error": "SIF Challenge/CAPTCHA"}
+                body_text = await page.locator("body").inner_text()
+                state = detect_sif_auth_state(page.url, body_text)
+                if state == "login_required" and attempt == 0:
+                    logged_in = await ensure_sif_logged_in(page, phone=phone, password=password)
+                    if logged_in:
+                        continue
+                    return {"data": [], "error": "SIF Auto Login Failed"}
+                if state == "login_required":
+                    return {"data": [], "error": "SIF Login Required"}
+                if state == "challenge":
+                    return {"data": [], "error": "SIF Challenge/CAPTCHA"}
+                return {"data": [], "error": "SIF Empty Data"}
             return {"data": [], "error": "SIF Empty Data"}
         finally:
             await self.sif_page_queue.put(page)

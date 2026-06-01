@@ -38,6 +38,41 @@ bash scripts/crawl.sh --sif-only B0CDX5XGLK
 PYTHONPATH=src .venv/bin/python crawl_once.py https://www.amazon.com/dp/B0CDX5XGLK/ --outfile runtime_data/results.jsonl
 ```
 
+生成按 `bindKey` 管理的每日报表 CSV：
+
+```bash
+bash scripts/daily_report.sh --bindkey demo-keyboard
+```
+
+成功时只输出 CSV 文件绝对路径。
+
+指定日期：
+
+```bash
+bash scripts/daily_report.sh --bindkey demo-keyboard --date 2026-06-01
+```
+
+输出路径固定为：
+
+```text
+runtime_data/<bindkey>/<日期>-<序号>.csv
+```
+
+例如：
+
+```text
+runtime_data/demo-keyboard/2026-06-01-1.csv
+runtime_data/demo-keyboard/2026-06-01-2.csv
+```
+
+`bindKey` 对应的 ASIN 清单可以直接维护 `config/daily_bindings.json`，也可以用脚本管理：
+
+```bash
+scripts/daily_asin_list --bindkey demo-keyboard --action list
+scripts/daily_asin_list --bindkey demo-keyboard --action add --asin B0CDX5XGLK --asin B0TEST0001
+scripts/daily_asin_list --bindkey demo-keyboard --action remove --asin B0TEST0001
+```
+
 ## 目录结构
 
 ```text

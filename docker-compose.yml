@@ -24,6 +24,8 @@ services:
     build: .
     container_name: amz-sif-amazon-daemon
     command: ["python", "daemon_server.py"]
+    ports:
+      - "8001:8001"
     environment:
       - DOCKER_ENV=1
       - PORT=8001
@@ -40,6 +42,8 @@ services:
     build: .
     container_name: amz-sif-sif-daemon
     command: ["python", "daemon_server.py"]
+    ports:
+      - "8002:8002"
     environment:
       - DOCKER_ENV=1
       - PORT=8002

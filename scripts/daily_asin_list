@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
+
+export PYTHONPATH="$ROOT_DIR/src"
+"$PYTHON_BIN" "$ROOT_DIR/daily_asin_list.py" "$@"

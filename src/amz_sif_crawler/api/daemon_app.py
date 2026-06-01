@@ -35,6 +35,7 @@ def build_daemon_app() -> FastAPI:
         mode=daemon_mode,
         profile_dir=app_config.amazon_profile_dir if daemon_mode == "amazon" else app_config.sif_profile_dir,
         headless=app_config.amazon_headless if daemon_mode == "amazon" else app_config.sif_headless,
+        base_dir=app_config.base_dir,
     )
 
     @app.on_event("startup")

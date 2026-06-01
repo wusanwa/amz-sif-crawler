@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from contextlib import asynccontextmanager
@@ -65,14 +66,39 @@ def clone_profile_dir(profile_dir: str | Path, prefix: str) -> str:
         "SingletonCookie",
         "LOCK",
         "lockfile",
+        "Cache",
+        "Cache_Data",
+        "Code Cache",
+        "DawnCache",
+        "GPUCache",
+        "GrShaderCache",
+        "ShaderCache",
+        "Session Storage",
+        "blob_storage",
+        "shared_proto_db",
+        "Safe Browsing",
     }
+    ignored_suffixes = (".lock", ".log")
+    ignored_exact_files = {"LOG", "LOG.old", "LOCK", "Cookies-journal"}
+
+    def _ignore(_src: str, names: list[str]) -> set[str]:
+        skipped: set[str] = set()
+        for name in names:
+            if name in ignored_names or name in ignored_exact_files or name.endswith(ignored_suffixes):
+                skipped.add(name)
+        return skipped
 
     for child in source.iterdir():
-        if child.name in ignored_names or child.name.endswith(".lock"):
+        if child.name in ignored_names or child.name in ignored_exact_files or child.name.endswith(ignored_suffixes):
             continue
         destination = target / child.name
-        if child.is_dir():
-            shutil.copytree(child, destination, symlinks=True, dirs_exist_ok=True)
-        else:
-            shutil.copy2(child, destination)
+        try:
+            if child.is_dir():
+                shutil.copytree(child, destination, symlinks=True, dirs_exist_ok=True, ignore=_ignore)
+            else:
+                shutil.copy2(child, destination)
+        except (PermissionError, OSError, shutil.Error):
+            # Browser profile caches often contain locked or root-owned files.
+            # Best-effort cloning is enough for reusing login state.
+            continue
     return str(target)
