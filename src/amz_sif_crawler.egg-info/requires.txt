@@ -1,0 +1,8 @@
+diskcache
+fastapi
+httpx
+mcp[fastmcp]
+playwright
+pytest
+pydantic
+uvicorn

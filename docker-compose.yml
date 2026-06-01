@@ -1,48 +1,14 @@
 services:
-  # 网关中心 (并发指挥官)
-  mcp-gateway:
+  crawler:
     build: .
-    container_name: mcp-gateway
+    container_name: amz-sif-crawler
     ports:
-      - "8888:8888"
-    command: ["python3", "mcp_gateway.py"]
+      - "8000:8000"
     environment:
       - DOCKER_ENV=1
-      - AMZ_WORKER_URL=http://amazon-worker:8000
-      - SIF_WORKER_URL=http://sif-worker:8000
-      - GATEWAY_MODE=parallel
+      - PORT=8000
       - CORS_ALLOW_ORIGINS=*
-    depends_on:
-      - amazon-worker
-      - sif-worker
-    restart: unless-stopped
-
-  # Amazon 专用节点 (持有 Amazon Profile 登录状态)
-  amazon-worker:
-    build: .
-    environment:
-      - NODE_TYPE=amazon
-      - PYTHONUNBUFFERED=1
-      - DOCKER_ENV=1
-      - CACHE_DIR=/app/cache_db
-      - CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
-    command: ["bash", "/app/scripts/worker_entrypoint.sh"]
     volumes:
-      - ./runtime_data/profiles/amazon:/app/profiles/amazon:ro
-      - ./runtime_data/cache_db/amazon:/app/cache_db
-    restart: unless-stopped
-
-  # SIF 专用节点 (持有 SIF Profile 登录状态)
-  sif-worker:
-    build: .
-    environment:
-      - NODE_TYPE=sif
-      - PYTHONUNBUFFERED=1
-      - DOCKER_ENV=1
-      - CACHE_DIR=/app/cache_db
-      - CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
-    command: ["bash", "/app/scripts/worker_entrypoint.sh"]
-    volumes:
-      - ./runtime_data/profiles/sif:/app/profiles/sif:ro
-      - ./runtime_data/cache_db/sif:/app/cache_db
+      - ./runtime_data:/app/runtime_data
+      - ./config:/app/config
     restart: unless-stopped

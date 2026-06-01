@@ -1,15 +1,8 @@
 {
-  "BASE_DIR": ".",
   "CACHE_EXPIRY_SEC": 80000,
   "DEBUG_MODE": false,
-  "LLM": {
-    "provider": "gpt-5.4-nano",
-    "api_token": "sk-Gpru3ui5t3CoHQ94kZDKRlD9wynY9MzUSIQ9gDmx2kho7gbz",
-    "base_url": "https://www.aillm.link/v1",
-    "temperature": 0
-  },
   "BATCH": {
-    "outfile": "batch_results_v3.jsonl"
+    "outfile": "batch_results.jsonl"
   },
   "SIF": {
     "phone": "13714929577",

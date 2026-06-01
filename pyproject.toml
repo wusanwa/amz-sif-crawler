@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amz-sif-crawler"
+version = "0.1.0"
+description = "Amazon + SIF crawler using static JS capture with Playwright"
+requires-python = ">=3.11"
+dependencies = [
+  "diskcache",
+  "fastapi",
+  "httpx",
+  "mcp[fastmcp]",
+  "playwright",
+  "pytest",
+  "pydantic",
+  "uvicorn",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

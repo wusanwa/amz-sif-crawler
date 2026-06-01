@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: amz-sif-crawler
+Version: 0.1.0
+Summary: Amazon + SIF crawler using static JS capture with Playwright
+Requires-Python: >=3.11
+Requires-Dist: diskcache
+Requires-Dist: fastapi
+Requires-Dist: httpx
+Requires-Dist: mcp[fastmcp]
+Requires-Dist: playwright
+Requires-Dist: pytest
+Requires-Dist: pydantic
+Requires-Dist: uvicorn
