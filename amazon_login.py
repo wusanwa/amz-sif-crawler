@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import shutil
 from pathlib import Path
 
 from playwright.async_api import Page, async_playwright
@@ -17,10 +18,14 @@ logger = logging.getLogger("amazon-login")
 
 async def run_login_flow() -> int:
     config = load_app_config()
-    ensure_runtime_dirs(config)
-
+    
+    # 强制重置已损坏的 Amazon profile 目录
     profile_dir = config.amazon_profile_dir
     logger.info("📂 Amazon Profile 路径: %s", profile_dir)
+    if profile_dir.exists():
+        logger.info("🗑️ 检测到可能已损坏的 Amazon Profile 目录，正在重置以确保 Chromium 顺利启动...")
+        shutil.rmtree(profile_dir, ignore_errors=True)
+    ensure_runtime_dirs(config)
 
     async with async_playwright() as playwright:
         logger.info("🚀 正在启动有头模式 Chromium 浏览器...")
