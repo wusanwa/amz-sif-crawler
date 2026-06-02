@@ -2,9 +2,9 @@
 name: amz-sif-crawler
 description: >-
   当用户要做 Amazon/SIF 商品监控、竞品监控、按 ASIN 或 Amazon 链接批量查询，
-  或者要维护 bindKey 绑定的每日报告 ASIN 列表、按 bindKey 生成日报 CSV 时使用。
+  或者要维护每日报告 ASIN 列表、生成每日报告 CSV 时使用。
   本 Skill 只允许两类任务：直接监控查询；每日报告（列表增删查 + CSV 生成）。
-  每日报告请求必须能从 HERMES_BINDING_KEY 环境变量解析出 bindKey；
+  每日报告请求必须能从环境变量解析出目标日报分组；
   任何超出监控查询和日报范围的请求都不要使用本 Skill。
 ---
 
@@ -16,8 +16,8 @@ description: >-
 
 - “查几个 ASIN / 链接的 Amazon 或 SIF 数据”
 - “做竞品监控 / 商品监控 / SIF 监控”
-- “维护某个 `bindKey` 的日报 ASIN 清单”
-- “按某个 `bindKey` 生成日报 CSV”
+- “维护某个日报分组的 ASIN 清单”
+- “生成某个日报分组的日报 CSV”
 
 本 Skill 只负责两类任务：
 
@@ -32,7 +32,7 @@ description: >-
 
 - 通用开发问答
 - 无关项目的查询
-- 无法从环境变量解析出 `bindKey` 的每日报告请求
+- 缺少必要上下文的每日报告请求
 - 任何超出 Amazon 商品监控、SIF 监控、竞品监控、每日监控范围的行为
 - 让 agent 介绍仓库、接口设计、部署方式或其他无关能力
 
@@ -135,35 +135,29 @@ bash scripts/crawl.sh --sif-only <amazon-url-or-asin> [more...]
 
 ### 硬限制
 
-凡是每日报告相关任务，必须能从环境变量解析到 `bindKey`。
+凡是每日报告相关任务，只能基于命令返回的结果路径和当前环境变量 `HERMES_BINDING_KEY` 对应的分组执行。
 
-`bindKey` 的来源按下面顺序解析：
+硬限制如下：
 
-1. 环境变量 `HERMES_BINDING_KEY`
-
-无法解析 `bindKey` 时：
-
-- 禁止执行
+- 只可根据命令结果中的输出路径查询和交付日报内容
+- 禁止私自遍历不属于当前 `HERMES_BINDING_KEY` 环境的其他分组
 - 禁止猜测
-- 禁止默认选择某个分组
-- 禁止替用户补全
+- 禁止默认选择其他分组
+- 禁止替用户补全分组
+- 禁止脱离命令结果路径自行查找其他日报文件
 
-如果环境变量里没有 `bindKey`，只能要求用户补充，不能执行任何日报动作。
+如果当前环境中没有 `HERMES_BINDING_KEY`，或者命令结果没有返回有效路径，拒绝 执行 ，不能执行任何日报动作。
 
 ### 2.1 ASIN 列表管理
 
-用于管理 `config/daily_bindings.json` 中的：
-
-```text
-bindKey -> ASIN 列表
-```
+用于管理 `config/daily_bindings.json` 中的日报分组 ASIN 列表。
 
 统一使用：
 
 ```bash
-HERMES_BINDING_KEY=<bindKey> scripts/daily_asin_list --action list
-HERMES_BINDING_KEY=<bindKey> scripts/daily_asin_list --action add --asin <ASIN1> --asin <ASIN2>
-HERMES_BINDING_KEY=<bindKey> scripts/daily_asin_list --action remove --asin <ASIN1> --asin <ASIN2>
+scripts/daily_asin_list --action list
+scripts/daily_asin_list --action add --asin <ASIN1> --asin <ASIN2>
+scripts/daily_asin_list --action remove --asin <ASIN1> --asin <ASIN2>
 ```
 
 只允许三种动作：
@@ -174,30 +168,28 @@ HERMES_BINDING_KEY=<bindKey> scripts/daily_asin_list --action remove --asin <ASI
 
 规则：
 
-- `bindKey` 必须可解析，只能来自 `HERMES_BINDING_KEY`
 - `add` / `remove` 时，`--asin` 必须提供，且可重复传入
 - 这是日报分组维护，不等于立即抓取
 
 执行后要明确返回：
 
-- `bindKey`
+- 目标日报分组
 - 当前 ASIN 列表
 - 列表数量
 - 本次是查询、增加还是删除
 
 ### 2.2 每日报告执行
 
-用于按 `bindKey` 生成日报 CSV，统一使用：
+用于生成日报 CSV，统一使用：
 
 ```bash
-HERMES_BINDING_KEY=<bindKey> bash scripts/daily_report.sh
-HERMES_BINDING_KEY=<bindKey> bash scripts/daily_report.sh --date YYYY-MM-DD
-HERMES_BINDING_KEY=<bindKey> bash scripts/daily_report.sh --mode both
+bash scripts/daily_report.sh
+bash scripts/daily_report.sh --date YYYY-MM-DD
+bash scripts/daily_report.sh --mode both
 ```
 
 参数规则：
 
-- `bindKey` 必须可解析，只能来自 `HERMES_BINDING_KEY`
 - `--date` 可选，格式必须为 `YYYY-MM-DD`
 - `--mode` 可选，支持 `both`、`amazon`、`sif`
 
@@ -214,20 +206,23 @@ HERMES_BINDING_KEY=<bindKey> bash scripts/daily_report.sh --mode both
 
 1. 读取命令输出中的 CSV 路径
 2. 确认 CSV 文件已经生成
-3. 把该 CSV 作为日报交付物返回给用户，或者至少明确告知生成路径
+3. 读取 CSV 内容，按内容整理成适合直接发送给用户的日报结果
+4. 优先把 CSV 文件作为日报交付物返回给用户
+5. 如果 CSV 文件发送失败或当前会话无法直接发送文件，必须根据 CSV 内容把完整日报结果直接发给用户，并同时告知生成路径
 
 禁止只回复：
 
 - “执行成功”
 - “命令已跑完”
 - 单独一行路径但不说明它是日报产物
+- 只说“CSV 已生成”但不发送内容
 
 ### 日报场景的行为限制
 
 日报模块下，禁止做下面这些事：
 
-- 没有 `bindKey` 就执行日报
-- 环境变量没有 `bindKey` 还执行日报
+- 没有目标日报分组就执行日报
+- 环境变量没有目标日报分组还执行日报
 - 把直接监控查询冒充成每日报告
 - 把每日报告任务改成任意自定义批量抓取
 - 绕过 `config/daily_bindings.json` 直接虚构日报输入
@@ -250,5 +245,5 @@ HERMES_BINDING_KEY=<bindKey> bash scripts/daily_report.sh --mode both
 
 1. 只要是 Amazon/SIF/竞品/商品监控查询，就走“直接监控查询”
 2. 只要是日报列表维护或日报生成，就走“每日报告”
-3. 只要是每日报告但无法从环境变量解析 `bindKey`，立即停止并要求补充
+3. 只要是每日报告但缺少必要上下文，立即停止并要求补充
 4. 只要不属于上面两类，就不要使用本 Skill
