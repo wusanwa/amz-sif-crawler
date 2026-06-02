@@ -16,8 +16,8 @@ description: >-
 
 - “查几个 ASIN / 链接的 Amazon 或 SIF 数据”
 - “做竞品监控 / 商品监控 / SIF 监控”
-- “维护某个日报分组的 ASIN 清单”
-- “生成某个日报分组的日报 CSV”
+- “维护日报的 ASIN 清单”
+- “生成日报 CSV”
 
 本 Skill 只负责两类任务：
 
@@ -32,6 +32,7 @@ description: >-
 
 - 通用开发问答
 - 无关项目的查询
+- 本Skill未提供的其他能力问题
 - 缺少必要上下文的每日报告请求
 - 任何超出 Amazon 商品监控、SIF 监控、竞品监控、每日监控范围的行为
 - 让 agent 介绍仓库、接口设计、部署方式或其他无关能力
@@ -152,6 +153,12 @@ bash scripts/crawl.sh --sif-only <amazon-url-or-asin> [more...]
 
 用于管理 `config/daily_bindings.json` 中的日报分组 ASIN 列表。
 
+**⚠️ 脚本权限检查：** `scripts/daily_asin_list` 有时会丢失执行权限（`chmod 644`）。执行前必须检查：
+```bash
+ls -la scripts/daily_asin_list 2>/dev/null | grep -q '^-rwx' || chmod +x scripts/daily_asin_list
+```
+或直接用 `bash scripts/daily_asin_list` 调用。
+
 统一使用：
 
 ```bash
@@ -210,6 +217,15 @@ bash scripts/daily_report.sh --mode both
 4. 优先把 CSV 文件作为日报交付物返回给用户
 5. 如果 CSV 文件发送失败或当前会话无法直接发送文件，必须根据 CSV 内容把完整日报结果直接发给用户，并同时告知生成路径
 
+#### DingTalk 交付特殊处理
+
+目标为 **钉钉 DingTalk** 时，`MEDIA:` 附件语法不可用（webhook 回复不支持本地文件附件）。必须：
+- **直接以文本/Markdown 形式发送完整日报内容**
+- 同时告知 CSV 文件路径（用户可通过路径查看原始 CSV）
+- 禁止尝试用 `MEDIA:` 发送文件
+
+如果日报内容太长（如 30+ ASIN），以表格摘要呈现，避免单条消息过长。
+
 禁止只回复：
 
 - “执行成功”
@@ -238,6 +254,22 @@ bash scripts/daily_report.sh --mode both
 - 每日报告执行：直接给 CSV 产物与路径
 
 除非用户明确追问，否则不要展开介绍整个仓库实现。
+
+## ⚠️ 已知掉坑
+
+### 1. config/daily_bindings.json 可能在技能更新时被覆盖
+
+当本 Skill 的 SKILL.md 被更新（或整个技能目录被重新部署）时，`config/daily_bindings.json` 中的绑定分组数据可能丢失，只保留 `demo-keyboard` 等初始分组。
+
+**防范：**
+- 执行任何 `--action list` 后，如果列表为空但预期有数据，立即检查 JSON 文件是否被重置
+- 如果发现丢失，从历史会话中恢复 ASIN 列表并重新添加
+- 不要只告诉用户"数据丢了"——主动从 session_search 中找回并重建
+
+### 2. 大批量 ASIN（30+）可能导致 daemon 超时
+
+默认 daemon 超时为 90 秒。30 个 ASIN 同时抓取 Amazon + SIF 可能超时（`httpx.ReadTimeout`）。
+**修复：** 将 `src/amz_sif_crawler/runtime/daemon_client.py` 中的 `timeout: float = 90.0` 改为 `300.0`。
 
 ## 最小决策规则
 

@@ -10,7 +10,7 @@ async def call_daemon(
     base_url: str,
     path: str,
     payload: dict[str, Any],
-    timeout: float = 90.0,
+    timeout: float = 300.0,
 ) -> dict[str, Any]:
     url = f"{base_url.rstrip('/')}{path}"
     async with httpx.AsyncClient(timeout=timeout) as client:

@@ -27,3 +27,4 @@ node_modules/
 !profile_bundles/
 !profile_bundles/.gitkeep
 profile_bundles/*.tar.gz
+config/daily_bindings.json
