@@ -5,6 +5,15 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 CRAWLER_API_URL="${CRAWLER_API_URL:-http://127.0.0.1:8000/crawl}"
 
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+  else
+    echo "Python interpreter not executable: $ROOT_DIR/.venv/bin/python" >&2
+    exit 1
+  fi
+fi
+
 if [[ $# -lt 1 ]]; then
   echo "Usage: bash scripts/crawl.sh [--amazon-only|--sif-only] <amazon-url-or-asin> [more...]" >&2
   exit 1

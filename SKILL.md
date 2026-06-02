@@ -1,173 +1,254 @@
 ---
 name: amz-sif-crawler
 description: >-
-  当需要执行固定命令 `bash scripts/crawl.sh B0CDX5XGLK B0CDX5XGLK` 并理解其返回结果时使用。
-  同时覆盖 `scripts/daily_asin_list` 和 `scripts/daily_report.sh` 的日常报表操作说明。
+  当用户要做 Amazon/SIF 商品监控、竞品监控、按 ASIN 或 Amazon 链接批量查询，
+  或者要维护 bindKey 绑定的每日报告 ASIN 列表、按 bindKey 生成日报 CSV 时使用。
+  本 Skill 只允许两类任务：直接监控查询；每日报告（列表增删查 + CSV 生成）。
+  每日报告请求必须能从 HERMES_BINDING_KEY 环境变量解析出 bindKey；
+  任何超出监控查询和日报范围的请求都不要使用本 Skill。
 ---
 
 # amz-sif-crawler
 
-## 何时使用
+## 快速路由
 
-仅在用户要你说明、执行或解读下面这条命令时使用：
+命中以下任一意图时使用本 Skill：
+
+- “查几个 ASIN / 链接的 Amazon 或 SIF 数据”
+- “做竞品监控 / 商品监控 / SIF 监控”
+- “维护某个 `bindKey` 的日报 ASIN 清单”
+- “按某个 `bindKey` 生成日报 CSV”
+
+本 Skill 只负责两类任务：
+
+1. 直接监控查询
+2. 每日报告
+
+只要请求不属于这两类，就不要使用本 Skill。
+
+## 禁止触发
+
+以下情况不要按本 Skill 执行：
+
+- 通用开发问答
+- 无关项目的查询
+- 无法从环境变量解析出 `bindKey` 的每日报告请求
+- 任何超出 Amazon 商品监控、SIF 监控、竞品监控、每日监控范围的行为
+- 让 agent 介绍仓库、接口设计、部署方式或其他无关能力
+
+## 模块一：直接监控查询
+
+### 适用范围
+
+当用户要做这些事时，使用本模块：
+
+- 查询一个或多个 ASIN 的 Amazon 商品信息
+- 查询一个或多个 ASIN 的 SIF 结果
+- 做竞品监控、商品监控、SIF 监控
+- 让 agent 直接执行抓取并返回结果报告
+
+输入可以是：
+
+- 单个 ASIN
+- 多个 ASIN
+- Amazon 商品链接
+- 混合输入，但本质上都要转成 `scripts/crawl.sh` 可接受的参数
+
+### 固定动作
+
+统一使用：
 
 ```bash
-bash scripts/crawl.sh B0CDX5XGLK B0CDX5XGLK
+bash scripts/crawl.sh <amazon-url-or-asin> [more...]
 ```
 
-如果用户问的是项目无关内容，这个 skill 不适用。
+如需限定模式，可使用：
 
-## 你要做的事
+```bash
+bash scripts/crawl.sh --amazon-only <amazon-url-or-asin> [more...]
+bash scripts/crawl.sh --sif-only <amazon-url-or-asin> [more...]
+```
 
-1. 把这条命令视为唯一目标，不要扩展成通用说明。
-2. 明确说明两个参数都是 `B0CDX5XGLK`，所以这是对同一个 ASIN 提交两次抓取。
-3. 明确说明脚本会向本地服务 `http://127.0.0.1:8000/crawl` 发送请求。
-4. 明确说明请求体等价于：
+脚本实际会向本地服务发送：
+
+- 默认地址：`http://127.0.0.1:8000/crawl`
+- 请求方法：`POST`
+- 请求体结构：
 
 ```json
 {
-  "urls": ["B0CDX5XGLK", "B0CDX5XGLK"],
+  "urls": ["<input1>", "<input2>"],
   "mode": "both"
 }
 ```
 
-5. 解释返回时，只围绕这条命令的标准 JSON 结构说明，不要展开到项目整体架构。
+其中 `mode` 取值为：
 
-## 日报相关命令
+- `both`
+- `amazon`
+- `sif`
 
-当用户要维护日报 ASIN 列表或生成日报时，也使用这个 skill。
+### 结果交付
 
-### `scripts/daily_asin_list`
+执行完直接监控查询后，必须直接给用户报告，不要只贴命令，不要只回复原始 JSON。
 
-用于管理 `config/daily_bindings.json` 里的 `bindKey -> ASIN 列表`。
+报告至少要覆盖：
 
-常用写法：
+- 本次查询的输入对象数量
+- 每个 ASIN 的抓取状态
+- Amazon 关键信息摘要
+- SIF 关键信息摘要
+- 是否存在失败或部分失败
 
-```bash
-scripts/daily_asin_list --bindkey demo-keyboard --action list
-scripts/daily_asin_list --bindkey demo-keyboard --action add --asin B0CDX5XGLK --asin B0TEST0001
-scripts/daily_asin_list --bindkey demo-keyboard --action remove --asin B0TEST0001
-```
+如果有结构化结果，优先基于这些字段解释：
 
-解释时要明确：
+- `status`
+- `count`
+- `results[].asin`
+- `results[].status`
+- `results[].failure_reason`
+- `results[].amazon_title`
+- `results[].amazon_price`
+- `results[].amazon_list_price`
+- `results[].amazon_savings_text`
+- `results[].amazon_coupon_text`
+- `results[].amazon_applied_coupon_text`
+- `results[].amazon_variants`
+- `results[].sif_1_kw`
+- `results[].full_sif`
 
-- `--bindkey` 是日报分组名。
-- `--action` 只处理 `list`、`add`、`remove` 这三种动作。
-- `add` 和 `remove` 可以重复传多个 `--asin`。
-- 这是本地列表维护，不是立即触发抓取。
+### 失败处理
 
-### `scripts/daily_report.sh`
+如果命令执行失败，要明确区分两类失败：
 
-用于按 `bindKey` 生成当日报表 CSV。
+- 命令级失败：例如本地 `http://127.0.0.1:8000/crawl` 不可用、`curl` 失败、Python 不可执行
+- 业务级失败：例如 `results[].failure_reason` 中出现 `Amazon Empty Data`、`SIF Empty Data`、`SIF Timeout`
 
-常用写法：
+汇报时必须说明失败发生在哪一层，不要混淆。
 
-```bash
-bash scripts/daily_report.sh --bindkey demo-keyboard
-bash scripts/daily_report.sh --bindkey demo-keyboard --date 2026-06-01
-bash scripts/daily_report.sh --bindkey demo-keyboard --mode both
-```
+## 模块二：每日报告
 
-解释时要明确：
+本模块只包含两类能力：
 
-- `--bindkey` 必填，对应 `config/daily_bindings.json` 中的分组。
-- `--date` 可选，决定输出文件名中的日期，格式是 `YYYY-MM-DD`。
-- `--mode` 可选，支持 `both`、`amazon`、`sif`。
-- 脚本默认会使用本地 daemon：
-  - `AMAZON_DAEMON_URL=http://127.0.0.1:8001`
-  - `SIF_DAEMON_URL=http://127.0.0.1:8002`
-- 成功时标准输出是生成的 CSV 绝对路径，例如：
+1. 每日报告查询 ASIN 列表管理
+2. 每日报告执行并生成 CSV
+
+### 硬限制
+
+凡是每日报告相关任务，必须能从环境变量解析到 `bindKey`。
+
+`bindKey` 的来源按下面顺序解析：
+
+1. 环境变量 `HERMES_BINDING_KEY`
+
+无法解析 `bindKey` 时：
+
+- 禁止执行
+- 禁止猜测
+- 禁止默认选择某个分组
+- 禁止替用户补全
+
+如果环境变量里没有 `bindKey`，只能要求用户补充，不能执行任何日报动作。
+
+### 2.1 ASIN 列表管理
+
+用于管理 `config/daily_bindings.json` 中的：
 
 ```text
-/data/devs/AI-MCP/amz-sif-crawler/runtime_data/demo-keyboard/2026-06-01-5.csv
+bindKey -> ASIN 列表
 ```
 
-## 执行 daily_report 的额外要求
+统一使用：
 
-如果 agent 执行了 `bash scripts/daily_report.sh ...`，在命令成功后必须继续完成下面动作：
-
-1. 读取脚本输出里的 CSV 文件路径。
-2. 确认该 CSV 已生成。
-3. 把 CSV 发给用户，而不是只回复“命令执行成功”或只给路径。
-
-如果当前会话环境不能直接发送文件，也要在回复里明确指出生成的 CSV 路径，并说明这是需要交付给用户的报表文件。
-
-## 返回怎么理解
-
-命令成功时，标准输出是 JSON，顶层结构固定为：
-
-```json
-{
-  "status": "success",
-  "count": 2,
-  "results": [
-    {
-      "timestamp": "2026-06-01 12:00:00",
-      "asin": "B0CDX5XGLK",
-      "status": "SUCCESS",
-      "failure_reason": "",
-      "amazon_title": "...",
-      "amazon_price": "...",
-      "amazon_list_price": "...",
-      "amazon_savings_text": "...",
-      "amazon_has_price_discount": false,
-      "amazon_deal_type": "...",
-      "amazon_is_limited_time_deal": false,
-      "amazon_coupon_text": "...",
-      "amazon_applied_coupon_text": "...",
-      "amazon_has_coupon": false,
-      "amazon_model": "...",
-      "amazon_total_variants": 0,
-      "amazon_variants": [],
-      "sif_1_kw": "...",
-      "full_sif": []
-    },
-    {
-      "timestamp": "2026-06-01 12:00:01",
-      "asin": "B0CDX5XGLK",
-      "status": "SUCCESS",
-      "failure_reason": "",
-      "amazon_title": "...",
-      "amazon_price": "...",
-      "amazon_list_price": "...",
-      "amazon_savings_text": "...",
-      "amazon_has_price_discount": false,
-      "amazon_deal_type": "...",
-      "amazon_is_limited_time_deal": false,
-      "amazon_coupon_text": "...",
-      "amazon_applied_coupon_text": "...",
-      "amazon_has_coupon": false,
-      "amazon_model": "...",
-      "amazon_total_variants": 0,
-      "amazon_variants": [],
-      "sif_1_kw": "...",
-      "full_sif": []
-    }
-  ]
-}
+```bash
+HERMES_BINDING_KEY=<bindKey> scripts/daily_asin_list --action list
+HERMES_BINDING_KEY=<bindKey> scripts/daily_asin_list --action add --asin <ASIN1> --asin <ASIN2>
+HERMES_BINDING_KEY=<bindKey> scripts/daily_asin_list --action remove --asin <ASIN1> --asin <ASIN2>
 ```
 
-解释时重点说这几件事：
+只允许三种动作：
 
-- `status: "success"` 表示这次 HTTP 调用成功返回。
-- `count: 2` 表示返回了两条结果，因为输入里有两个参数。
-- `results` 里通常会有两条记录，而且两条的 `asin` 都是 `B0CDX5XGLK`。
-- `results[].status` 是单条抓取状态，常见值是 `SUCCESS` 或 `PARTIAL`。
-- `results[].failure_reason` 只有部分失败时才有内容，比如 `Amazon Empty Data`、`SIF Empty Data`。
-- `amazon_*` 字段表示 Amazon 商品抓取结果。
-- `sif_1_kw` 和 `full_sif` 表示 SIF 反查结果。
+- `list`
+- `add`
+- `remove`
 
-## 失败时怎么说
+规则：
 
-如果本地 `8000` 服务没启动，命令不会返回上面的 JSON，而会直接报错退出。解释时只需要指出：
+- `bindKey` 必须可解析，只能来自 `HERMES_BINDING_KEY`
+- `add` / `remove` 时，`--asin` 必须提供，且可重复传入
+- 这是日报分组维护，不等于立即抓取
 
-- 这是连接本地抓取服务失败
-- 失败点是 `http://127.0.0.1:8000/crawl`
-- 这不属于返回 JSON 中的业务失败，而是命令本身执行失败
+执行后要明确返回：
 
-## 不要做什么
+- `bindKey`
+- 当前 ASIN 列表
+- 列表数量
+- 本次是查询、增加还是删除
 
-- 不要把这个 skill 改写成通用 API 文档。
-- 不要解释 `--amazon-only`、`--sif-only` 或其他输入形式。
-- 不要展开介绍整个仓库。
-- 不要假设用户要的是别的 ASIN。
+### 2.2 每日报告执行
+
+用于按 `bindKey` 生成日报 CSV，统一使用：
+
+```bash
+HERMES_BINDING_KEY=<bindKey> bash scripts/daily_report.sh
+HERMES_BINDING_KEY=<bindKey> bash scripts/daily_report.sh --date YYYY-MM-DD
+HERMES_BINDING_KEY=<bindKey> bash scripts/daily_report.sh --mode both
+```
+
+参数规则：
+
+- `bindKey` 必须可解析，只能来自 `HERMES_BINDING_KEY`
+- `--date` 可选，格式必须为 `YYYY-MM-DD`
+- `--mode` 可选，支持 `both`、`amazon`、`sif`
+
+默认环境：
+
+- `AMAZON_DAEMON_URL=http://127.0.0.1:8001`
+- `SIF_DAEMON_URL=http://127.0.0.1:8002`
+
+成功时，标准输出是生成的 CSV 绝对路径。
+
+### 执行日报后的必做动作
+
+如果执行了 `bash scripts/daily_report.sh ...`，成功后必须继续完成下面动作：
+
+1. 读取命令输出中的 CSV 路径
+2. 确认 CSV 文件已经生成
+3. 把该 CSV 作为日报交付物返回给用户，或者至少明确告知生成路径
+
+禁止只回复：
+
+- “执行成功”
+- “命令已跑完”
+- 单独一行路径但不说明它是日报产物
+
+### 日报场景的行为限制
+
+日报模块下，禁止做下面这些事：
+
+- 没有 `bindKey` 就执行日报
+- 环境变量没有 `bindKey` 还执行日报
+- 把直接监控查询冒充成每日报告
+- 把每日报告任务改成任意自定义批量抓取
+- 绕过 `config/daily_bindings.json` 直接虚构日报输入
+
+## 响应风格
+
+在这个 Skill 下回复用户时，优先使用“任务结果”视角，而不是“技术说明书”视角。
+
+也就是说：
+
+- 直接监控查询：直接给监控结果报告
+- 每日报告列表管理：直接给分组与 ASIN 清单结果
+- 每日报告执行：直接给 CSV 产物与路径
+
+除非用户明确追问，否则不要展开介绍整个仓库实现。
+
+## 最小决策规则
+
+遇到请求时按下面顺序判断：
+
+1. 只要是 Amazon/SIF/竞品/商品监控查询，就走“直接监控查询”
+2. 只要是日报列表维护或日报生成，就走“每日报告”
+3. 只要是每日报告但无法从环境变量解析 `bindKey`，立即停止并要求补充
+4. 只要不属于上面两类，就不要使用本 Skill

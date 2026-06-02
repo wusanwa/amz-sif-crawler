@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -43,7 +44,24 @@ async def detect_home_login_block(page: Page) -> bool:
 
 
 async def is_sif_logged_in(page: Page) -> bool:
-    return not await detect_home_login_block(page)
+    if await detect_home_login_block(page):
+        return False
+    try:
+        body = await page.locator("body").inner_text()
+    except Exception:
+        return False
+    if "注册免费领会员" in body and "亚马逊卖家在用的关键词运营工具" in body:
+        return False
+    return True
+
+
+async def wait_for_login_state(page: Page, *, timeout_ms: int = 12000) -> bool:
+    deadline = asyncio.get_running_loop().time() + (timeout_ms / 1000)
+    while asyncio.get_running_loop().time() < deadline:
+        if await is_sif_logged_in(page):
+            return True
+        await page.wait_for_timeout(500)
+    return await is_sif_logged_in(page)
 
 
 async def open_login_dialog(page: Page) -> bool:
@@ -162,5 +180,4 @@ async def ensure_sif_logged_in(page: Page, *, phone: str, password: str) -> bool
     await page.wait_for_timeout(500)
     if not await submit_password_login(page):
         return False
-    await page.wait_for_timeout(4000)
-    return await is_sif_logged_in(page)
+    return await wait_for_login_state(page)

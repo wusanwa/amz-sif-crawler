@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,7 @@ SIF_USER_AGENT = (
 def detect_sif_auth_state(url: str = "", text: str = "") -> str:
     lower_url = (url or "").lower()
     lower_text = (text or "").lower()
+    compact_text = "".join(lower_text.split())
     hard_login_signals = [
         "session expired",
         "unauthorized",
@@ -39,16 +41,25 @@ def detect_sif_auth_state(url: str = "", text: str = "") -> str:
         "手机号码",
         "密码",
     ]
-    logged_in_markers = ["查销量", "反查流量", "广告透视仪", "流量时光机", "会员购买", "到期"]
+    logged_in_markers = ["查流量结构", "反查流量词", "反查流量", "广告透视仪", "流量时光机"]
     challenge_signals = ["captcha", "robot", "verify", "verification", "验证码", "人机验证", "安全验证"]
+    reverse_path_markers = ["/reverse", "/search", "/traffic", "/keyword"]
+    home_login_markers = ["注册免费领会员", "登录", "免费使用插件", "亚马逊卖家在用的关键词运营工具"]
 
     if "/login" in lower_url or "/signin" in lower_url:
         return "login_required"
     if any(marker in lower_text for marker in challenge_signals):
         return "challenge"
+    if any(marker in lower_text for marker in hard_login_signals):
+        return "login_required"
+    if "https://www.sif.com/" in lower_url and not any(marker in lower_url for marker in reverse_path_markers):
+        if all(marker in text for marker in home_login_markers):
+            return "login_required"
+    if "登录" in text and "注册免费领会员" in text and "会员购买" in text:
+        return "login_required"
     if any(marker in lower_text for marker in logged_in_markers):
         return "ok"
-    if any(marker in lower_text for marker in hard_login_signals):
+    if compact_text.startswith("功能介绍生态中心关于我们帮助中心"):
         return "login_required"
     return "ok"
 
@@ -137,7 +148,9 @@ def try_refresh_sif_profile(asin: str, log_progress: Callable[[str, str], None],
     if not login_script.exists():
         return {"data": [], "error": "SIF Login Required"}
     log_progress(asin, "🔑 运行 sif_login.py 修补 SIF profile...")
-    proc = subprocess.run([sys.executable, str(login_script)], capture_output=True, text=True)
+    env = dict(os.environ)
+    env.setdefault("SIF_LOGIN_HEADLESS", "1")
+    proc = subprocess.run([sys.executable, str(login_script)], capture_output=True, text=True, env=env)
     if proc.returncode == 0:
         return {"data": [], "error": "SIF Session Refreshed, please retry"}
     return {"data": [], "error": f"SIF Login Failed: {proc.stderr.strip()}"}

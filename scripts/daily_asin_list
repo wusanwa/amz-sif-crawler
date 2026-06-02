@@ -4,5 +4,20 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+  else
+    echo "Python interpreter not executable: $ROOT_DIR/.venv/bin/python" >&2
+    exit 1
+  fi
+fi
+
+if [[ -z "${HERMES_BINDING_KEY:-}" ]]; then
+  echo "Usage: HERMES_BINDING_KEY=<bindKey> scripts/daily_asin_list --action <list|add|remove> [--asin <ASIN>]" >&2
+  echo "bindKey must be provided via HERMES_BINDING_KEY environment variable." >&2
+  exit 1
+fi
+
 export PYTHONPATH="$ROOT_DIR/src"
 "$PYTHON_BIN" "$ROOT_DIR/daily_asin_list.py" "$@"
